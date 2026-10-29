@@ -142,12 +142,12 @@
 
     <!-- Floating capture toolbar pill -->
     <div
-      class="floating-pill absolute top-3 left-1/2 -translate-x-1/2 z-50 flex items-center bg-[#fdfdfd] dark:bg-[#2c2c2c] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_8px_24px_rgba(0,0,0,0.18)] rounded-[10px] p-1 gap-1 text-neutral-800 dark:text-neutral-100 cursor-default"
+      class="floating-pill absolute top-3 left-1/2 -translate-x-1/2 z-50 flex items-center bg-[#fdfdfd] dark:bg-[#161b26] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_8px_32px_rgba(0,0,0,0.4)] rounded-[10px] p-1 gap-1 text-neutral-800 dark:text-neutral-100 cursor-default"
     >
       <!-- Camera Button (Snip Mode) -->
       <button
         type="button"
-        class="relative h-8 px-3.5 rounded-[6px] flex items-center justify-center transition-all {currentMode === 'snip' ? 'bg-[#f0f0f0] dark:bg-[#383838] border border-black/[0.05] dark:border-white/[0.08] shadow-[0_1px_2px_rgba(0,0,0,0.06)]' : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'}"
+        class="relative h-8 px-3.5 rounded-[6px] flex items-center justify-center transition-all {currentMode === 'snip' ? 'bg-[#f0f0f0] dark:bg-[#252c3d] border border-black/[0.05] dark:border-white/[0.08] shadow-[0_1px_2px_rgba(0,0,0,0.06)]' : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'}"
         onclick={() => currentMode = 'snip'}
         title="Snip mode"
       >
@@ -161,7 +161,7 @@
       <!-- Video Button (Record Mode) -->
       <button
         type="button"
-        class="relative h-8 px-3.5 rounded-[6px] flex items-center justify-center transition-all {currentMode === 'record' ? 'bg-[#f0f0f0] dark:bg-[#383838] border border-black/[0.05] dark:border-white/[0.08] shadow-[0_1px_2px_rgba(0,0,0,0.06)]' : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'}"
+        class="relative h-8 px-3.5 rounded-[6px] flex items-center justify-center transition-all {currentMode === 'record' ? 'bg-[#f0f0f0] dark:bg-[#252c3d] border border-black/[0.05] dark:border-white/[0.08] shadow-[0_1px_2px_rgba(0,0,0,0.06)]' : 'hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'}"
         onclick={() => currentMode = 'record'}
         title="Record mode"
       >
@@ -189,7 +189,7 @@
         <!-- Snip Mode Dropdown Menu -->
         {#if isMenuOpen}
           <div
-            class="absolute top-full mt-2 left-1/2 -translate-x-1/2 z-50 min-w-[160px] bg-[#fbfbfb] dark:bg-[#2c2c2c] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_10px_25px_rgba(0,0,0,0.22)] py-1 flex flex-col"
+            class="absolute top-full mt-2 left-1/2 -translate-x-1/2 z-50 min-w-[160px] bg-[#fbfbfb] dark:bg-[#181d28] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_12px_32px_rgba(0,0,0,0.45)] py-1 flex flex-col"
           >
             {#each snipOptions as opt}
               <button

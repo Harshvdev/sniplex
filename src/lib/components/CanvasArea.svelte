@@ -148,7 +148,7 @@
   }
 </script>
 
-<div class="flex-1 overflow-auto bg-[#e8e8e8] dark:bg-[#1a1a1a] flex items-center justify-center p-8 relative select-none">
+<div class="flex-1 overflow-auto bg-[#eef1f6] dark:bg-[#090b0e] flex items-center justify-center p-8 relative select-none transition-colors duration-150">
   <!-- Container with scaling for zoom -->
   <div
     class="relative transition-transform duration-100 ease-out"
@@ -186,7 +186,7 @@
             <div class="absolute top-1/2 -translate-y-1/2 -left-1.5 w-3 h-3 bg-white border border-black/40 rounded-sm"></div>
 
             <!-- Floating Crop Action Controls -->
-            <div class="absolute -top-12 left-1/2 -translate-x-1/2 flex items-center gap-1.5 bg-white dark:bg-[#2c2c2c] px-2 py-1 rounded-[6px] shadow-lg border border-black/10 dark:border-white/10">
+            <div class="absolute -top-12 left-1/2 -translate-x-1/2 flex items-center gap-1.5 bg-white dark:bg-[#161b26] px-2 py-1 rounded-[6px] shadow-lg border border-black/10 dark:border-white/10">
               <button
                 type="button"
                 class="flex items-center gap-1 px-2.5 py-1 bg-[#0067c0] text-white text-xs font-medium rounded hover:bg-[#1070c7] transition-colors"

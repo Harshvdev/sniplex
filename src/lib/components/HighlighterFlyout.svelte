@@ -21,7 +21,7 @@
   ];
 </script>
 
-<div class="p-3 w-56 bg-white dark:bg-[#2c2c2c] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_10px_25px_rgba(0,0,0,0.2)] text-neutral-800 dark:text-neutral-100 select-none">
+<div class="p-3 w-56 bg-white dark:bg-[#181d28] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_12px_32px_rgba(0,0,0,0.45)] text-neutral-800 dark:text-neutral-100 select-none">
   <div class="text-[12px] font-medium text-neutral-500 dark:text-neutral-400 mb-2">Highlighter Color</div>
   <div class="grid grid-cols-6 gap-1.5 mb-4">
     {#each highlighterColors as h}

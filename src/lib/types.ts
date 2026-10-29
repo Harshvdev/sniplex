@@ -31,3 +31,5 @@ export interface TabItem {
   timestamp: string;
 }
 
+export type { ShortcutItem } from './shortcuts';
+

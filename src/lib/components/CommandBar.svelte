@@ -123,14 +123,14 @@
   ];
 </script>
 
-<div class="h-12 border-b border-black/[0.08] dark:border-white/[0.08] bg-[#f9f9f9] dark:bg-[#282828] flex items-center justify-between px-3 text-neutral-800 dark:text-neutral-200 select-none relative z-30">
+<div class="h-12 border-b border-black/[0.06] dark:border-white/[0.07] bg-[#f9fafb] dark:bg-[#161b26] flex items-center justify-between px-3 text-neutral-800 dark:text-neutral-200 select-none relative z-30 transition-colors duration-150">
   <!-- LEFT: Trigger & Modes -->
   <div class="flex items-center gap-2">
     <!-- Camera / Video Segmented Pill -->
     <div class="flex items-center h-8 bg-black/[0.04] dark:bg-white/[0.06] rounded-[6px] p-0.5 border border-black/[0.05] dark:border-white/[0.05]">
       <button
         type="button"
-        class="h-full flex items-center justify-center px-2.5 rounded-[4px] text-xs font-medium transition-all {mode === 'snip' ? 'bg-white dark:bg-[#383838] text-neutral-900 dark:text-white shadow-sm' : 'text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white'}"
+        class="h-full flex items-center justify-center px-2.5 rounded-[4px] text-xs font-medium transition-all {mode === 'snip' ? 'bg-white dark:bg-[#222a3b] text-neutral-900 dark:text-white shadow-sm' : 'text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white'}"
         onclick={() => onModeChange('snip')}
         title="Snip mode"
       >
@@ -140,7 +140,7 @@
 
       <button
         type="button"
-        class="h-full flex items-center justify-center px-2.5 rounded-[4px] text-xs font-medium transition-all {mode === 'record' ? 'bg-white dark:bg-[#383838] text-neutral-900 dark:text-white shadow-sm' : 'text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white'}"
+        class="h-full flex items-center justify-center px-2.5 rounded-[4px] text-xs font-medium transition-all {mode === 'record' ? 'bg-white dark:bg-[#222a3b] text-neutral-900 dark:text-white shadow-sm' : 'text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white'}"
         onclick={() => onModeChange('record')}
         title="Record mode"
       >
@@ -172,7 +172,7 @@
 
       <!-- Delay Dropdown Menu -->
       {#if activeFlyout === 'delay'}
-        <div class="absolute top-full mt-1.5 left-0 z-50 min-w-[160px] bg-white dark:bg-[#2c2c2c] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_10px_25px_rgba(0,0,0,0.2)] py-1 flex flex-col">
+        <div class="absolute top-full mt-1.5 left-0 z-50 min-w-[160px] bg-white dark:bg-[#181d28] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_12px_32px_rgba(0,0,0,0.45)] py-1 flex flex-col">
           {#each delayOptions as opt}
             <button
               type="button"
@@ -205,7 +205,7 @@
       </button>
 
       {#if activeFlyout === 'snipType'}
-        <div class="absolute top-full mt-1.5 left-0 z-50 min-w-[150px] bg-white dark:bg-[#2c2c2c] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_10px_25px_rgba(0,0,0,0.2)] py-1 flex flex-col">
+        <div class="absolute top-full mt-1.5 left-0 z-50 min-w-[150px] bg-white dark:bg-[#181d28] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_12px_32px_rgba(0,0,0,0.45)] py-1 flex flex-col">
           {#each snipTypes as st}
             <button
               type="button"
@@ -298,7 +298,7 @@
         </button>
 
         {#if activeFlyout === 'eraser'}
-          <div class="absolute top-full mt-1.5 left-1/2 -translate-x-1/2 z-50 min-w-[140px] bg-white dark:bg-[#2c2c2c] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_10px_25px_rgba(0,0,0,0.2)] py-1 flex flex-col">
+          <div class="absolute top-full mt-1.5 left-1/2 -translate-x-1/2 z-50 min-w-[140px] bg-white dark:bg-[#181d28] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_12px_32px_rgba(0,0,0,0.45)] py-1 flex flex-col">
             <button
               type="button"
               class="px-3 py-1.5 text-[12px] text-left hover:bg-black/[0.05] dark:hover:bg-white/[0.06] rounded-[4px] mx-1 transition-colors text-red-600 dark:text-red-400"
@@ -416,7 +416,7 @@
         </button>
 
         {#if activeFlyout === 'zoom'}
-          <div class="absolute top-full mt-1.5 right-0 z-50 min-w-[130px] bg-white dark:bg-[#2c2c2c] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_10px_25px_rgba(0,0,0,0.2)] py-1 flex flex-col">
+          <div class="absolute top-full mt-1.5 right-0 z-50 min-w-[130px] bg-white dark:bg-[#181d28] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_12px_32px_rgba(0,0,0,0.45)] py-1 flex flex-col">
             {#each [50, 75, 100, 150, 200] as z}
               <button
                 type="button"
@@ -480,7 +480,7 @@
       </button>
 
       {#if activeFlyout === 'more'}
-        <div class="absolute top-full mt-1.5 right-0 z-50 min-w-[160px] bg-white dark:bg-[#2c2c2c] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_10px_25px_rgba(0,0,0,0.2)] py-1 flex flex-col text-neutral-800 dark:text-neutral-200">
+        <div class="absolute top-full mt-1.5 right-0 z-50 min-w-[160px] bg-white dark:bg-[#181d28] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_12px_32px_rgba(0,0,0,0.45)] py-1 flex flex-col text-neutral-800 dark:text-neutral-200">
           <button
             type="button"
             class="flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-left hover:bg-black/[0.05] dark:hover:bg-white/[0.06] rounded-[4px] mx-1 transition-colors"

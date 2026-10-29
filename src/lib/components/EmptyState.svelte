@@ -36,7 +36,7 @@
   ];
 </script>
 
-<div class="flex-1 flex flex-col items-center justify-center p-8 text-center bg-[#f3f3f3] dark:bg-[#202020] text-neutral-800 dark:text-neutral-100 select-none">
+<div class="flex-1 flex flex-col items-center justify-center p-8 text-center bg-[#f3f4f6] dark:bg-[#0d0f14] text-neutral-800 dark:text-neutral-100 select-none transition-colors duration-150">
   <!-- Brand Logo Lockup -->
   <div class="mb-6 flex flex-col items-center">
     <div class="w-32 h-32 rounded-3xl bg-white/80 dark:bg-white/[0.04] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_8px_30px_rgba(0,0,0,0.06)] flex items-center justify-center backdrop-blur-md mb-3 transition-transform hover:scale-105 duration-200">
@@ -71,7 +71,7 @@
     <div class="relative">
       <button
         type="button"
-        class="h-9 flex items-center justify-center gap-2 px-3 bg-white dark:bg-[#2c2c2c] hover:bg-neutral-50 dark:hover:bg-[#333333] border border-black/10 dark:border-white/10 rounded-[6px] text-[13px] text-neutral-700 dark:text-neutral-200 transition-colors shadow-sm"
+        class="h-9 flex items-center justify-center gap-2 px-3 bg-white dark:bg-[#181d28] hover:bg-neutral-50 dark:hover:bg-[#222938] border border-black/10 dark:border-white/10 rounded-[6px] text-[13px] text-neutral-700 dark:text-neutral-200 transition-colors shadow-sm"
         onclick={() => isTypeOpen = !isTypeOpen}
       >
         <SnipIcons type={snipType} className="w-4 h-4 text-neutral-600 dark:text-neutral-300" />
@@ -80,7 +80,7 @@
       </button>
 
       {#if isTypeOpen}
-        <div class="absolute top-full mt-1.5 left-0 z-50 min-w-[150px] bg-white dark:bg-[#2c2c2c] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_10px_25px_rgba(0,0,0,0.2)] py-1 flex flex-col text-left">
+        <div class="absolute top-full mt-1.5 left-0 z-50 min-w-[150px] bg-white dark:bg-[#181d28] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_10px_25px_rgba(0,0,0,0.4)] py-1 flex flex-col text-left">
           {#each types as t}
             <button
               type="button"
@@ -99,7 +99,7 @@
     <div class="relative">
       <button
         type="button"
-        class="h-9 flex items-center justify-center gap-2 px-3 bg-white dark:bg-[#2c2c2c] hover:bg-neutral-50 dark:hover:bg-[#333333] border border-black/10 dark:border-white/10 rounded-[6px] text-[13px] text-neutral-700 dark:text-neutral-200 transition-colors shadow-sm"
+        class="h-9 flex items-center justify-center gap-2 px-3 bg-white dark:bg-[#181d28] hover:bg-neutral-50 dark:hover:bg-[#222938] border border-black/10 dark:border-white/10 rounded-[6px] text-[13px] text-neutral-700 dark:text-neutral-200 transition-colors shadow-sm"
         onclick={() => isDelayOpen = !isDelayOpen}
       >
         <span>{delays.find(d => d.id === delay)?.label}</span>
@@ -107,7 +107,7 @@
       </button>
 
       {#if isDelayOpen}
-        <div class="absolute top-full mt-1.5 left-0 z-50 min-w-[160px] bg-white dark:bg-[#2c2c2c] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_10px_25px_rgba(0,0,0,0.2)] py-1 flex flex-col text-left">
+        <div class="absolute top-full mt-1.5 left-0 z-50 min-w-[160px] bg-white dark:bg-[#181d28] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_10px_25px_rgba(0,0,0,0.4)] py-1 flex flex-col text-left">
           {#each delays as d}
             <button
               type="button"
