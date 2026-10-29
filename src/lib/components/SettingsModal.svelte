@@ -1,5 +1,6 @@
 <script lang="ts">
   import { ArrowLeft, Moon, Sun, Monitor, Check } from '@lucide/svelte';
+  import SniplexLogo from './SniplexLogo.svelte';
   import type { AppTheme } from '../types';
 
   let {
@@ -155,9 +156,9 @@
     <!-- Section 3: About -->
     <div class="bg-white dark:bg-[#2c2c2c] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-sm p-4">
       <div class="flex items-center gap-3 mb-2">
-        <img src="/sniplex-icon.svg" alt="Sniplex" class="w-8 h-8 rounded" />
+        <SniplexLogo size={36} showText={false} />
         <div>
-          <div class="text-[14px] font-semibold">Sniplex</div>
+          <div class="text-[15px] font-semibold tracking-[-0.01em]">Sniplex</div>
           <div class="text-[12px] text-neutral-500">Version 1.0.0 (Screen Capture & Markup Tool)</div>
         </div>
       </div>

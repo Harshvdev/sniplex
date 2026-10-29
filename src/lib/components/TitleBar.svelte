@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Plus, X, Minus, Square, Sun, Moon } from '@lucide/svelte';
+  import SniplexLogo from './SniplexLogo.svelte';
   import type { TabItem, AppTheme } from '../types';
 
   let {
@@ -24,9 +25,8 @@
 <div class="h-10 border-b border-black/[0.08] dark:border-white/[0.08] bg-[#f3f3f3] dark:bg-[#202020] flex items-center justify-between px-2 select-none">
   <!-- Left: App Icon & Tab Strip -->
   <div class="flex items-center gap-1 overflow-x-auto no-scrollbar max-w-[70%]">
-    <div class="flex items-center gap-2 px-2 py-1 mr-1">
-      <img src="/sniplex-icon.svg" alt="Sniplex" class="w-4 h-4 rounded" />
-      <span class="text-[12px] font-medium text-neutral-600 dark:text-neutral-400">Sniplex</span>
+    <div class="flex items-center px-1.5 py-1 mr-1">
+      <SniplexLogo size={18} showText={true} />
     </div>
 
     <!-- Tabs Strip -->

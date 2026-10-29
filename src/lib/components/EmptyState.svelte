@@ -1,6 +1,7 @@
 <script lang="ts">
-  import { Plus, Camera, ChevronDown } from '@lucide/svelte';
+  import { Plus, ChevronDown } from '@lucide/svelte';
   import SnipIcons from '../icons/SnipIcons.svelte';
+  import SniplexLogo from './SniplexLogo.svelte';
   import type { SnipType, SnipDelay } from '../types';
 
   let {
@@ -36,31 +37,18 @@
 </script>
 
 <div class="flex-1 flex flex-col items-center justify-center p-8 text-center bg-[#f3f3f3] dark:bg-[#202020] text-neutral-800 dark:text-neutral-100 select-none">
-  <!-- Original Clean-room Vector Art (Minimalist camera crop illustration) -->
-  <div class="mb-6 relative">
-    <div class="w-32 h-32 rounded-3xl bg-gradient-to-b from-white/90 to-white/40 dark:from-white/10 dark:to-white/5 border border-black/10 dark:border-white/10 shadow-[0_8px_30px_rgba(0,0,0,0.08)] flex items-center justify-center relative overflow-hidden backdrop-blur-md">
-      <!-- Ambient light effect -->
-      <div class="absolute -top-10 -right-10 w-24 h-24 bg-[#0067c0]/20 rounded-full blur-2xl"></div>
-
-      <!-- Clean Scissor & Viewfinder graphic -->
-      <svg viewBox="0 0 64 64" class="w-16 h-16 text-[#0067c0] dark:text-[#60cdff]" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-        <!-- Viewfinder brackets -->
-        <path d="M 16 24 L 16 16 L 24 16" stroke-width="3" />
-        <path d="M 40 16 L 48 16 L 48 24" stroke-width="3" />
-        <path d="M 48 40 L 48 48 L 40 48" stroke-width="3" />
-        <path d="M 24 48 L 16 48 L 16 40" stroke-width="3" />
-
-        <!-- Scissors cutting action -->
-        <circle cx="26" cy="38" r="4" stroke-width="2" />
-        <circle cx="38" cy="38" r="4" stroke-width="2" />
-        <line x1="29" y1="35" x2="38" y2="24" stroke-width="2.5" />
-        <line x1="35" y1="35" x2="26" y2="24" stroke-width="2.5" />
-      </svg>
+  <!-- Brand Logo Lockup -->
+  <div class="mb-6 flex flex-col items-center">
+    <div class="w-32 h-32 rounded-3xl bg-white/80 dark:bg-white/[0.04] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_8px_30px_rgba(0,0,0,0.06)] flex items-center justify-center backdrop-blur-md mb-3 transition-transform hover:scale-105 duration-200">
+      <SniplexLogo size={72} showText={false} />
     </div>
+    <span class="text-2xl font-semibold tracking-[-0.02em] text-neutral-800 dark:text-neutral-100">
+      Sniplex
+    </span>
   </div>
 
   <!-- Primary Prompt Text -->
-  <h2 class="text-xl font-semibold mb-1 text-neutral-900 dark:text-neutral-100">
+  <h2 class="text-base font-medium mb-1 text-neutral-700 dark:text-neutral-300">
     Press the Print Screen key to start a snip
   </h2>
   <p class="text-neutral-500 dark:text-neutral-400 text-[13px] mb-8">
