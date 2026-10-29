@@ -23,6 +23,8 @@
     FolderOpen,
     Printer,
     Info,
+    Timer,
+    TimerOff,
   } from '@lucide/svelte';
   import SnipIcons from '../icons/SnipIcons.svelte';
   import PenFlyout from './PenFlyout.svelte';
@@ -126,82 +128,54 @@
 <div class="h-12 border-b border-black/[0.06] dark:border-white/[0.07] bg-[#f9fafb] dark:bg-[#161b26] flex items-center justify-between px-3 text-neutral-800 dark:text-neutral-200 select-none relative z-30 transition-colors duration-150">
   <!-- LEFT: Trigger & Modes -->
   <div class="flex items-center gap-2">
-    <!-- Camera / Video Segmented Pill -->
+    <!-- 1. "+ New" Button -->
+    <button
+      type="button"
+      class="h-8 flex items-center justify-center gap-1.5 px-3 bg-[#0067c0] hover:bg-[#1070c7] text-white text-xs font-medium rounded-[6px] shadow-sm transition-all transform active:scale-95"
+      onclick={onTriggerNew}
+      title="New snip (Print Screen or Ctrl+N)"
+    >
+      <Plus class="w-3.5 h-3.5 stroke-[2.2]" />
+      <span>New</span>
+    </button>
+
+    <!-- 2. Camera / Video Segmented Pill (Matching Reference) -->
     <div class="flex items-center h-8 bg-black/[0.04] dark:bg-white/[0.06] rounded-[6px] p-0.5 border border-black/[0.05] dark:border-white/[0.05]">
       <button
         type="button"
-        class="h-full flex items-center justify-center px-2.5 rounded-[4px] text-xs font-medium transition-all {mode === 'snip' ? 'bg-white dark:bg-[#222a3b] text-neutral-900 dark:text-white shadow-sm' : 'text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white'}"
+        class="relative h-full flex items-center justify-center px-2.5 rounded-[4px] text-xs font-medium transition-all {mode === 'snip' ? 'bg-white dark:bg-[#222a3b] text-neutral-900 dark:text-white shadow-sm' : 'text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white'}"
         onclick={() => onModeChange('snip')}
         title="Snip mode"
       >
-        <Camera class="w-3.5 h-3.5 mr-1" />
-        <span>Snip</span>
+        <Camera class="w-3.5 h-3.5" />
+        {#if mode === 'snip'}
+          <div class="absolute bottom-0.5 left-1/2 -translate-x-1/2 w-3.5 h-[2px] rounded-full bg-[#0067c0] dark:bg-[#60cdff]"></div>
+        {/if}
       </button>
 
       <button
         type="button"
-        class="h-full flex items-center justify-center px-2.5 rounded-[4px] text-xs font-medium transition-all {mode === 'record' ? 'bg-white dark:bg-[#222a3b] text-neutral-900 dark:text-white shadow-sm' : 'text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white'}"
+        class="relative h-full flex items-center justify-center px-2.5 rounded-[4px] text-xs font-medium transition-all {mode === 'record' ? 'bg-white dark:bg-[#222a3b] text-neutral-900 dark:text-white shadow-sm' : 'text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white'}"
         onclick={() => onModeChange('record')}
         title="Record mode"
       >
-        <Video class="w-3.5 h-3.5 mr-1" />
-        <span>Record</span>
+        <Video class="w-3.5 h-3.5" />
+        {#if mode === 'record'}
+          <div class="absolute bottom-0.5 left-1/2 -translate-x-1/2 w-3.5 h-[2px] rounded-full bg-[#0067c0] dark:bg-[#60cdff]"></div>
+        {/if}
       </button>
     </div>
 
-    <!-- "+ New" Split Button with Delay dropdown (Perfect match and size alignment) -->
-    <div class="flex items-stretch h-8 rounded-[6px] overflow-visible relative shadow-sm">
-      <button
-        type="button"
-        class="h-full flex items-center justify-center gap-1.5 px-2.5 bg-[#0067c0] hover:bg-[#1070c7] text-white text-xs font-medium rounded-l-[6px] transition-colors"
-        onclick={onTriggerNew}
-        title="New snip (Print Screen or Ctrl+N)"
-      >
-        <Plus class="w-3.5 h-3.5 stroke-[2.2]" />
-        <span>New</span>
-      </button>
-
-      <button
-        type="button"
-        class="h-full w-6 flex items-center justify-center bg-[#0067c0] hover:bg-[#1070c7] text-white border-l border-white/20 rounded-r-[6px] transition-colors"
-        onclick={() => toggleFlyout('delay')}
-        title="Snip delay"
-      >
-        <ChevronDown class="w-3.5 h-3.5 stroke-[2]" />
-      </button>
-
-      <!-- Delay Dropdown Menu -->
-      {#if activeFlyout === 'delay'}
-        <div class="absolute top-full mt-1.5 left-0 z-50 min-w-[160px] bg-white dark:bg-[#181d28] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_12px_32px_rgba(0,0,0,0.45)] py-1 flex flex-col">
-          {#each delayOptions as opt}
-            <button
-              type="button"
-              class="relative flex items-center justify-between px-3 py-1.5 text-[12px] text-left hover:bg-black/[0.05] dark:hover:bg-white/[0.06] rounded-[4px] mx-1 transition-colors"
-              onclick={() => { onDelayChange(opt.id); activeFlyout = null; }}
-            >
-              <span>{opt.label}</span>
-              {#if delay === opt.id}
-                <Check class="w-3.5 h-3.5 text-[#0067c0] dark:text-[#60cdff]" />
-              {/if}
-            </button>
-          {/each}
-        </div>
-      {/if}
-    </div>
-
-    <!-- Snip Mode Dropdown Button -->
+    <!-- 3. Snip Mode Dropdown Button (Rectangle v) -->
     <div class="relative">
       <button
         type="button"
-        class="h-8 flex items-center gap-1.5 px-2.5 rounded-[6px] hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-transparent hover:border-black/[0.05] dark:hover:border-white/[0.05] transition-colors text-xs text-neutral-700 dark:text-neutral-300"
+        class="h-8 flex items-center gap-1 px-2 rounded-[6px] hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-transparent hover:border-black/[0.05] dark:hover:border-white/[0.05] transition-colors text-xs text-neutral-700 dark:text-neutral-300"
         onclick={() => toggleFlyout('snipType')}
         title="Snip mode"
       >
-        <SnipIcons type={snipType} className="w-3.5 h-3.5 text-neutral-700 dark:text-neutral-300" />
-        <span class="capitalize">
-          {snipType === 'fullscreen' ? 'Full screen' : snipType}
-        </span>
-        <ChevronDown class="w-3.5 h-3.5 text-neutral-500" />
+        <SnipIcons type={snipType} className="w-4 h-4 text-neutral-700 dark:text-neutral-300" />
+        <ChevronDown class="w-3 h-3 text-neutral-500 stroke-[1.8]" />
       </button>
 
       {#if activeFlyout === 'snipType'}
@@ -209,11 +183,53 @@
           {#each snipTypes as st}
             <button
               type="button"
-              class="flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-left hover:bg-black/[0.05] dark:hover:bg-white/[0.06] rounded-[4px] mx-1 transition-colors"
+              class="relative flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-left hover:bg-black/[0.05] dark:hover:bg-white/[0.06] rounded-[4px] mx-1 transition-colors text-neutral-800 dark:text-neutral-200"
               onclick={() => { onSnipTypeChange(st.id); activeFlyout = null; }}
             >
-              <SnipIcons type={st.id} className="w-3.5 h-3.5" />
+              {#if snipType === st.id}
+                <div class="absolute left-1 w-[2.5px] h-3.5 rounded-full bg-[#0067c0] dark:bg-[#60cdff]"></div>
+              {/if}
+              <div class="w-4 h-4 flex items-center justify-center ml-0.5 text-neutral-700 dark:text-neutral-300">
+                <SnipIcons type={st.id} className="w-3.5 h-3.5" />
+              </div>
               <span>{st.label}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+    </div>
+
+    <!-- 4. Timer Option (On the right of rectangle button) -->
+    <div class="relative">
+      <button
+        type="button"
+        class="h-8 flex items-center gap-1 px-2 rounded-[6px] hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-transparent hover:border-black/[0.05] dark:hover:border-white/[0.05] transition-colors text-xs text-neutral-700 dark:text-neutral-300"
+        onclick={() => toggleFlyout('delay')}
+        title={delay === 0 ? 'Snip delay (No delay)' : `Snip delay (${delay} seconds)`}
+      >
+        {#if delay === 0}
+          <TimerOff class="w-4 h-4 text-neutral-700 dark:text-neutral-300 stroke-[1.8]" />
+        {:else}
+          <div class="relative flex items-center">
+            <Timer class="w-4 h-4 text-[#0067c0] dark:text-[#60cdff] stroke-[1.8]" />
+            <span class="absolute -bottom-1 -right-1 text-[9px] font-bold font-mono px-0.5 rounded bg-neutral-200 dark:bg-neutral-700 text-neutral-800 dark:text-neutral-100 leading-none">{delay}</span>
+          </div>
+        {/if}
+        <ChevronDown class="w-3 h-3 text-neutral-500 stroke-[1.8]" />
+      </button>
+
+      {#if activeFlyout === 'delay'}
+        <div class="absolute top-full mt-1.5 left-0 z-50 min-w-[160px] bg-white dark:bg-[#181d28] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_12px_32px_rgba(0,0,0,0.45)] py-1 flex flex-col">
+          {#each delayOptions as opt}
+            <button
+              type="button"
+              class="relative flex items-center justify-between px-3 py-1.5 text-[12px] text-left hover:bg-black/[0.05] dark:hover:bg-white/[0.06] rounded-[4px] mx-1 transition-colors text-neutral-800 dark:text-neutral-200"
+              onclick={() => { onDelayChange(opt.id); activeFlyout = null; }}
+            >
+              <span>{opt.label}</span>
+              {#if delay === opt.id}
+                <Check class="w-3.5 h-3.5 text-[#0067c0] dark:text-[#60cdff]" />
+              {/if}
             </button>
           {/each}
         </div>

@@ -5,6 +5,7 @@
   import EmptyState from './lib/components/EmptyState.svelte';
   import FloatingOverlay from './lib/components/FloatingOverlay.svelte';
   import SettingsModal from './lib/components/SettingsModal.svelte';
+  import { Timer } from '@lucide/svelte';
   import { loadShortcuts, matchesShortcut, type ShortcutItem } from './lib/shortcuts';
   import type { CaptureMode, SnipType, SnipDelay, ToolType, ShapeKind, AppTheme, TabItem, AppView } from './lib/types';
 
@@ -56,14 +57,32 @@
     }
   }
 
+  let countdown = $state<number | null>(null);
+  let countdownTimer: number | null = null;
+
   function handleTriggerNew() {
     if (delay > 0) {
-      setTimeout(() => {
-        isOverlayActive = true;
-      }, delay * 1000);
+      if (countdownTimer) clearInterval(countdownTimer);
+      countdown = delay;
+      countdownTimer = window.setInterval(() => {
+        if (countdown !== null && countdown > 1) {
+          countdown -= 1;
+        } else {
+          if (countdownTimer) clearInterval(countdownTimer);
+          countdownTimer = null;
+          countdown = null;
+          isOverlayActive = true;
+        }
+      }, 1000);
     } else {
       isOverlayActive = true;
     }
+  }
+
+  function handleCancelCountdown() {
+    if (countdownTimer) clearInterval(countdownTimer);
+    countdownTimer = null;
+    countdown = null;
   }
 
   function handleCapture(rect: { x: number; y: number; w: number; h: number }) {
@@ -228,9 +247,37 @@
       active={isOverlayActive}
       {mode}
       {snipType}
+      {delay}
       onClose={() => isOverlayActive = false}
       onCapture={handleCapture}
+      onModeChange={(m) => mode = m}
+      onSnipTypeChange={(t) => snipType = t}
+      onDelayChange={(d) => delay = d}
+      onScreenDraw={() => {
+        activeTool = 'pen';
+      }}
+      onTextActions={() => {
+        activeTool = 'text';
+      }}
+      onColorPicker={(color) => {
+        if (color) penColor = color;
+      }}
     />
+
+    <!-- Active Timer Countdown Toast -->
+    {#if countdown !== null}
+      <div class="fixed top-8 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2.5 px-4 py-2 bg-white/95 dark:bg-[#181d28]/95 border border-black/10 dark:border-white/10 rounded-full shadow-[0_8px_32px_rgba(0,0,0,0.3)] backdrop-blur-md text-xs font-medium text-neutral-800 dark:text-neutral-100 select-none animate-in fade-in zoom-in-95 duration-150">
+        <Timer class="w-4 h-4 text-[#0067c0] dark:text-[#60cdff] animate-pulse" />
+        <span>Snip in <strong class="font-bold font-mono text-[13px]">{countdown}</strong>s...</span>
+        <button
+          type="button"
+          class="ml-1 text-[11px] px-2 py-0.5 rounded-full hover:bg-black/5 dark:hover:bg-white/10 text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200 transition-colors cursor-pointer"
+          onclick={handleCancelCountdown}
+        >
+          Cancel
+        </button>
+      </div>
+    {/if}
 
     <!-- Quick Mode Switcher Dock (Bottom Left Floating Pill for easy testing) -->
     <aside aria-label="Demo controls" class="fixed bottom-3 left-3 z-40 flex items-center gap-1.5 bg-white/90 dark:bg-[#161b26]/90 border border-black/10 dark:border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.3)] rounded-full px-2.5 py-1 text-xs backdrop-blur-md">
