@@ -63,6 +63,7 @@
     onToggleCrop = () => {},
     onClearAll = () => {},
     onTriggerOcr = () => {},
+    onPrint = () => {},
   }: {
     mode: CaptureMode;
     snipType: SnipType;
@@ -94,6 +95,7 @@
     onToggleCrop: () => void;
     onClearAll: () => void;
     onTriggerOcr?: () => void;
+    onPrint?: () => void;
   } = $props();
 
   // Active popovers
@@ -102,6 +104,15 @@
 
   function toggleFlyout(name: string) {
     activeFlyout = activeFlyout === name ? null : name;
+  }
+
+  function handleWindowPointerDown(e: PointerEvent) {
+    if (!activeFlyout) return;
+    const target = e.target as Element | null;
+    if (target?.closest?.('.flyout-container')) {
+      return;
+    }
+    activeFlyout = null;
   }
 
   function handleCopy() {
@@ -126,6 +137,10 @@
     { id: 'freeform', label: 'Freeform' },
   ];
 </script>
+
+<svelte:window onpointerdown={handleWindowPointerDown} onkeydown={(e) => {
+  if (e.key === 'Escape' && activeFlyout) activeFlyout = null;
+}} />
 
 <div class="h-12 border-b border-black/[0.06] dark:border-white/[0.07] bg-[#f9fafb] dark:bg-[#161b26] flex items-center justify-between px-3 text-neutral-800 dark:text-neutral-200 select-none relative z-30 transition-colors duration-150">
   <!-- LEFT: Trigger & Modes -->
@@ -169,7 +184,7 @@
     </div>
 
     <!-- 3. Snip Mode Dropdown Button (Rectangle v) -->
-    <div class="relative">
+    <div class="relative flyout-container">
       <button
         type="button"
         class="h-8 flex items-center gap-1 px-2 rounded-[6px] hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-transparent hover:border-black/[0.05] dark:hover:border-white/[0.05] transition-colors text-xs text-neutral-700 dark:text-neutral-300"
@@ -202,7 +217,7 @@
     </div>
 
     <!-- 4. Timer Option (On the right of rectangle button) -->
-    <div class="relative">
+    <div class="relative flyout-container">
       <button
         type="button"
         class="h-8 flex items-center gap-1 px-2 rounded-[6px] hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-transparent hover:border-black/[0.05] dark:hover:border-white/[0.05] transition-colors text-xs text-neutral-700 dark:text-neutral-300"
@@ -255,7 +270,7 @@
       <div class="w-[1px] h-5 bg-black/[0.08] dark:bg-white/[0.08] mx-1"></div>
 
       <!-- Pen Tool -->
-      <div class="relative">
+      <div class="relative flyout-container">
         <button
           type="button"
           class="flex items-center gap-1 px-2 py-1.5 rounded-[6px] transition-colors {activeTool === 'pen' ? 'bg-black/[0.08] dark:bg-white/[0.12] text-neutral-900 dark:text-white' : 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300'}"
@@ -283,7 +298,7 @@
       </div>
 
       <!-- Highlighter Tool -->
-      <div class="relative">
+      <div class="relative flyout-container">
         <button
           type="button"
           class="flex items-center gap-1 px-2 py-1.5 rounded-[6px] transition-colors {activeTool === 'highlighter' ? 'bg-black/[0.08] dark:bg-white/[0.12] text-neutral-900 dark:text-white' : 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300'}"
@@ -311,7 +326,7 @@
       </div>
 
       <!-- Eraser Tool -->
-      <div class="relative">
+      <div class="relative flyout-container">
         <button
           type="button"
           class="flex items-center gap-1 px-2 py-1.5 rounded-[6px] transition-colors {activeTool === 'eraser' ? 'bg-black/[0.08] dark:bg-white/[0.12] text-neutral-900 dark:text-white' : 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300'}"
@@ -380,7 +395,7 @@
       </button>
 
       <!-- Shapes Tool -->
-      <div class="relative">
+      <div class="relative flyout-container">
         <button
           type="button"
           class="flex items-center gap-1 px-2 py-1.5 rounded-[6px] transition-colors {activeTool === 'shapes' ? 'bg-black/[0.08] dark:bg-white/[0.12] text-neutral-900 dark:text-white' : 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300'}"
@@ -432,7 +447,7 @@
   <div class="flex items-center gap-1">
     {#if hasImage}
       <!-- Zoom Dropdown -->
-      <div class="relative">
+      <div class="relative flyout-container">
         <button
           type="button"
           class="flex items-center gap-1 px-2 py-1 rounded-[5px] text-xs font-mono text-neutral-600 dark:text-neutral-400 hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors"
@@ -497,7 +512,7 @@
     {/if}
 
     <!-- "See More" (...) Menu -->
-    <div class="relative">
+    <div class="relative flyout-container">
       <button
         type="button"
         class="w-8 h-8 rounded-[6px] flex items-center justify-center hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300 transition-colors"
@@ -521,7 +536,7 @@
           <button
             type="button"
             class="flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-left hover:bg-black/[0.05] dark:hover:bg-white/[0.06] rounded-[4px] mx-1 transition-colors"
-            onclick={() => activeFlyout = null}
+            onclick={() => { onPrint(); activeFlyout = null; }}
           >
             <Printer class="w-3.5 h-3.5 text-neutral-500" />
             <span>Print</span>

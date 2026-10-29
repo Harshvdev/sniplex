@@ -103,9 +103,26 @@
     { id: 10, label: 'Snip in 10 seconds' },
   ];
 
+  function handleWindowPointerDown(e: PointerEvent) {
+    if (!isSnipMenuOpen && !isDelayMenuOpen) return;
+    const target = e.target as Element | null;
+    if (isSnipMenuOpen && !target?.closest?.('.snip-menu-container')) {
+      isSnipMenuOpen = false;
+    }
+    if (isDelayMenuOpen && !target?.closest?.('.delay-menu-container')) {
+      isDelayMenuOpen = false;
+    }
+  }
+
   function handleMouseDown(e: MouseEvent) {
     const target = e.target as HTMLElement;
     if (target.closest('.floating-pill')) return;
+
+    if (isSnipMenuOpen || isDelayMenuOpen) {
+      isSnipMenuOpen = false;
+      isDelayMenuOpen = false;
+      return;
+    }
 
     if (currentSnipType === 'fullscreen') {
       onCapture({ x: 0, y: 0, w: window.innerWidth, h: window.innerHeight });
@@ -190,9 +207,19 @@
   }
 </script>
 
-<svelte:window onkeydown={(e) => {
-  if (e.key === 'Escape' && active) onClose();
-}} />
+<svelte:window
+  onpointerdown={handleWindowPointerDown}
+  onkeydown={(e) => {
+    if (e.key === 'Escape') {
+      if (isSnipMenuOpen || isDelayMenuOpen) {
+        isSnipMenuOpen = false;
+        isDelayMenuOpen = false;
+      } else if (active) {
+        onClose();
+      }
+    }
+  }}
+/>
 
 {#if active}
   <!-- Fullscreen Dimming Overlay & Drag Surface -->
@@ -281,7 +308,7 @@
       </div>
 
       <!-- 2. Snip Mode Selector with Dropdown Chevron -->
-      <div class="relative">
+      <div class="relative snip-menu-container">
         <button
           type="button"
           class="h-8 px-2 rounded-[6px] hover:bg-black/[0.05] dark:hover:bg-white/[0.06] flex items-center justify-center gap-1 text-neutral-800 dark:text-neutral-100 transition-colors cursor-pointer"
@@ -318,7 +345,7 @@
       </div>
 
       <!-- 3. Timer Delay Option with Dropdown Chevron -->
-      <div class="relative">
+      <div class="relative delay-menu-container">
         <button
           type="button"
           class="h-8 px-2 rounded-[6px] hover:bg-black/[0.05] dark:hover:bg-white/[0.06] flex items-center justify-center gap-1 text-neutral-800 dark:text-neutral-100 transition-colors cursor-pointer"

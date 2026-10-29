@@ -51,7 +51,7 @@
 <div
   data-tauri-drag-region
   ondblclick={handleToggleMaximize}
-  class="h-10 border-b border-black/[0.06] dark:border-white/[0.07] bg-[#f9fafb] dark:bg-[#131720] flex items-center justify-between px-2 select-none transition-colors duration-150 cursor-default"
+  class="h-10 border-b border-black/[0.06] dark:border-white/[0.07] bg-[#f9fafb] dark:bg-[#131720] flex items-center justify-between pl-2 pr-0 select-none transition-colors duration-150 cursor-default"
 >
   <!-- Left: App Icon & Tab Strip -->
   <div class="flex items-center gap-1 overflow-x-auto no-scrollbar max-w-[70%]" data-tauri-drag-region>
@@ -87,36 +87,42 @@
   <!-- Draggable spacer area -->
   <div class="flex-1 h-full" data-tauri-drag-region></div>
 
-  <!-- Right: Window Controls (Minimize, Maximize, Close) -->
-  <div class="flex items-center">
+  <!-- Right: Window Controls (Minimize, Maximize, Close - flush to top & right edges) -->
+  <div class="flex items-stretch h-full">
     <!-- Minimize -->
     <button
       type="button"
-      class="w-10 h-8 flex items-center justify-center text-neutral-600 dark:text-neutral-400 hover:bg-black/[0.06] dark:hover:bg-white/[0.06] transition-colors cursor-pointer"
+      class="w-[46px] h-full flex items-center justify-center text-neutral-600 dark:text-neutral-400 hover:bg-black/[0.06] dark:hover:bg-white/[0.06] active:bg-black/[0.1] dark:active:bg-white/[0.1] transition-colors cursor-pointer"
       onclick={handleMinimize}
       title="Minimize"
     >
-      <Minus class="w-3.5 h-3.5 stroke-[1.8]" />
+      <svg class="w-2.5 h-2.5" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.2">
+        <path d="M0 5h10" />
+      </svg>
     </button>
 
     <!-- Maximize / Restore -->
     <button
       type="button"
-      class="w-10 h-8 flex items-center justify-center text-neutral-600 dark:text-neutral-400 hover:bg-black/[0.06] dark:hover:bg-white/[0.06] transition-colors cursor-pointer"
+      class="w-[46px] h-full flex items-center justify-center text-neutral-600 dark:text-neutral-400 hover:bg-black/[0.06] dark:hover:bg-white/[0.06] active:bg-black/[0.1] dark:active:bg-white/[0.1] transition-colors cursor-pointer"
       onclick={handleToggleMaximize}
       title="Maximize"
     >
-      <Square class="w-3 h-3 stroke-[1.8]" />
+      <svg class="w-2.5 h-2.5" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.2">
+        <rect x="0.6" y="0.6" width="8.8" height="8.8" />
+      </svg>
     </button>
 
     <!-- Close Window -->
     <button
       type="button"
-      class="w-10 h-8 flex items-center justify-center text-neutral-600 dark:text-neutral-400 hover:bg-[#c42b1c] hover:text-white transition-colors cursor-pointer"
+      class="w-[46px] h-full flex items-center justify-center text-neutral-600 dark:text-neutral-400 hover:bg-[#c42b1c] hover:text-white active:bg-[#a82315] transition-colors cursor-pointer"
       onclick={handleClose}
       title="Close"
     >
-      <X class="w-3.5 h-3.5 stroke-[1.8]" />
+      <svg class="w-2.5 h-2.5" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.2">
+        <path d="M0.5 0.5l9 9M9.5 0.5l-9 9" />
+      </svg>
     </button>
   </div>
 </div>

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { ArrowLeft, RotateCcw } from '@lucide/svelte';
+  import { invoke } from '@tauri-apps/api/core';
   import type { AppTheme } from '../types';
   import {
     loadShortcuts,
@@ -33,6 +34,38 @@
   let prtScnShortcut = $state(true);
   let recordMic = $state(false);
   let recordSystemAudio = $state(true);
+
+  // Screenshots save directory state
+  let saveFolder = $state<string>(
+    (typeof localStorage !== 'undefined' && localStorage.getItem('sniplex_save_folder')) || '~/Pictures/Screenshots'
+  );
+  let isEditingFolder = $state(false);
+  let tempFolder = $state('');
+
+  async function handlePickFolder() {
+    try {
+      const selected = await invoke<string | null>('select_folder');
+      if (selected) {
+        saveFolder = selected;
+        tempFolder = selected;
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem('sniplex_save_folder', selected);
+        }
+      }
+    } catch {
+      isEditingFolder = true;
+    }
+  }
+
+  function handleSaveCustomFolder() {
+    if (tempFolder.trim()) {
+      saveFolder = tempFolder.trim();
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem('sniplex_save_folder', saveFolder);
+      }
+    }
+    isEditingFolder = false;
+  }
 
   // Customizable shortcuts reactive state
   let shortcuts = $state<ShortcutItem[]>(loadShortcuts());
@@ -279,15 +312,53 @@
           </div>
 
           {#if autoSave}
-            <div class="flex items-center justify-between mt-3 pt-3 border-t border-black/5 dark:border-white/5 text-xs">
-              <span class="text-neutral-500 dark:text-neutral-400 font-mono">~/Pictures/Screenshots</span>
-              <button
-                type="button"
-                class="px-2.5 py-1 rounded hover:bg-black/5 dark:hover:bg-white/10 text-neutral-700 dark:text-neutral-300 font-medium transition-colors border border-black/10 dark:border-white/10 cursor-pointer"
-                onclick={() => alert('Folder picker')}
-              >
-                Change folder
-              </button>
+            <div class="mt-3 pt-3 border-t border-black/5 dark:border-white/5 text-xs">
+              {#if isEditingFolder}
+                <div class="flex items-center gap-2">
+                  <input
+                    type="text"
+                    bind:value={tempFolder}
+                    class="flex-1 px-2.5 py-1 text-xs rounded bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 text-neutral-800 dark:text-neutral-100 font-mono focus:outline-none focus:ring-1 focus:ring-[#0067c0]"
+                    placeholder="e.g. ~/Pictures/Screenshots"
+                  />
+                  <button
+                    type="button"
+                    class="px-2.5 py-1 rounded bg-[#0067c0] text-white font-medium hover:bg-[#005ea6] transition-colors cursor-pointer"
+                    onclick={handleSaveCustomFolder}
+                  >
+                    Save
+                  </button>
+                  <button
+                    type="button"
+                    class="px-2 py-1 rounded hover:bg-black/5 dark:hover:bg-white/10 text-neutral-600 dark:text-neutral-400 transition-colors cursor-pointer"
+                    onclick={() => { isEditingFolder = false; tempFolder = saveFolder; }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              {:else}
+                <div class="flex items-center justify-between">
+                  <span class="text-neutral-500 dark:text-neutral-400 font-mono truncate max-w-[280px]" title={saveFolder}>
+                    {saveFolder}
+                  </span>
+                  <div class="flex items-center gap-2">
+                    <button
+                      type="button"
+                      class="px-2.5 py-1 rounded hover:bg-black/5 dark:hover:bg-white/10 text-neutral-700 dark:text-neutral-300 font-medium transition-colors border border-black/10 dark:border-white/10 cursor-pointer"
+                      onclick={handlePickFolder}
+                    >
+                      Browse...
+                    </button>
+                    <button
+                      type="button"
+                      class="px-2.5 py-1 rounded hover:bg-black/5 dark:hover:bg-white/10 text-neutral-700 dark:text-neutral-300 font-medium transition-colors border border-black/10 dark:border-white/10 cursor-pointer"
+                      onclick={() => { isEditingFolder = true; tempFolder = saveFolder; }}
+                    >
+                      Edit
+                    </button>
+                  </div>
+                </div>
+              {/if}
             </div>
           {/if}
         </div>

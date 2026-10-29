@@ -63,3 +63,30 @@
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
 }
+
+@media print {
+  /* Hide application chrome, buttons, titlebar, floating pill during print */
+  .no-print,
+  nav,
+  header,
+  button,
+  [data-tauri-drag-region],
+  .floating-pill {
+    display: none !important;
+  }
+
+  body,
+  html {
+    background: white !important;
+    color: black !important;
+    overflow: visible !important;
+  }
+
+  /* Print canvas cleanly centered */
+  canvas {
+    max-width: 100% !important;
+    height: auto !important;
+    display: block !important;
+    margin: 0 auto !important;
+  }
+}

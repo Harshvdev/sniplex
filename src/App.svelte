@@ -53,6 +53,73 @@
   // Tabs - initially empty, starts in EmptyState view
   let tabs = $state<TabItem[]>([]);
   let activeTabId = $state('');
+  let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
+
+  // Hidden file input element for image ingestion
+  let fileInputEl = $state<HTMLInputElement | null>(null);
+
+  function handleOpenFile() {
+    fileInputEl?.click();
+  }
+
+  function handleFileSelect(e: Event) {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (readerEvent) => {
+      const dataUrl = readerEvent.target?.result as string;
+      if (!dataUrl) return;
+
+      const img = new Image();
+      img.onload = () => {
+        const newId = `tab-${Date.now()}`;
+        const newTab: TabItem = {
+          id: newId,
+          title: file.name,
+          imageUrl: dataUrl,
+          width: img.naturalWidth || 960,
+          height: img.naturalHeight || 540,
+          timestamp: 'Just now',
+        };
+        tabs = [...tabs, newTab];
+        activeTabId = newId;
+        view = 'editor';
+        input.value = '';
+      };
+      img.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function handlePrint() {
+    window.print();
+  }
+
+  function handleSave() {
+    const canvas = document.querySelector('canvas');
+    if (!canvas) return;
+    const link = document.createElement('a');
+    link.download = `Sniplex_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.png`;
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+  }
+
+  async function handleCopy() {
+    const canvas = document.querySelector('canvas');
+    if (!canvas) return;
+    try {
+      canvas.toBlob(async (blob) => {
+        if (!blob) return;
+        await navigator.clipboard.write([
+          new ClipboardItem({ 'image/png': blob }),
+        ]);
+      });
+    } catch (err) {
+      console.warn('Clipboard write error', err);
+    }
+  }
 
   function handleNewTab() {
     handleTriggerNew();
@@ -165,6 +232,27 @@
       handleTriggerNew();
       return;
     }
+
+    // Ctrl+O: Open image file
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'o') {
+      e.preventDefault();
+      handleOpenFile();
+      return;
+    }
+
+    // Ctrl+P: Print
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') {
+      e.preventDefault();
+      handlePrint();
+      return;
+    }
+
+    // Ctrl+S: Save screenshot
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      handleSave();
+      return;
+    }
   }
 </script>
 
@@ -209,10 +297,11 @@
       onHighlighterSizeChange={(s) => highlighterSize = s}
       onShapeKindChange={(s) => shapeKind = s}
       onZoomChange={(z) => zoom = z}
-      onSave={() => alert('Screenshot saved to Pictures/Screenshots')}
-      onCopy={() => {}}
+      onSave={handleSave}
+      onCopy={handleCopy}
       onOpenSettings={() => view = 'settings'}
-      onOpenFile={() => handleTriggerNew()}
+      onOpenFile={handleOpenFile}
+      onPrint={handlePrint}
       onToggleCrop={() => isCropping = !isCropping}
       onClearAll={() => {
         const canvas = document.querySelector('canvas');
@@ -235,7 +324,9 @@
       <EmptyState />
     {:else}
       <CanvasArea
-        imageUrl=""
+        imageUrl={activeTab?.imageUrl || ''}
+        width={activeTab?.width || 960}
+        height={activeTab?.height || 540}
         {zoom}
         {activeTool}
         {penColor}
@@ -247,6 +338,15 @@
         onCancelCrop={() => isCropping = false}
       />
     {/if}
+
+    <!-- Hidden file input for opening local images -->
+    <input
+      bind:this={fileInputEl}
+      type="file"
+      accept="image/*"
+      class="hidden"
+      onchange={handleFileSelect}
+    />
 
     <!-- 4. Floating Capture Overlay Bar -->
     <FloatingOverlay

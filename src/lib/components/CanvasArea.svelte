@@ -5,6 +5,8 @@
 
   let {
     imageUrl = '',
+    width = 960,
+    height = 540,
     zoom = 100,
     activeTool = 'pen',
     penColor = '#0078d4',
@@ -16,6 +18,8 @@
     onCancelCrop = () => {},
   }: {
     imageUrl: string;
+    width?: number;
+    height?: number;
     zoom: number;
     activeTool: ToolType;
     penColor: string;
@@ -33,11 +37,13 @@
   let lastX = $state(0);
   let lastY = $state(0);
 
-  // Default canvas dimensions
+  // Canvas dimensions
   let canvasWidth = $state(960);
   let canvasHeight = $state(540);
 
   onMount(() => {
+    canvasWidth = width || 960;
+    canvasHeight = height || 540;
     if (canvasEl) {
       canvasEl.width = canvasWidth;
       canvasEl.height = canvasHeight;
@@ -50,8 +56,8 @@
     if (imageUrl) {
       const img = new Image();
       img.onload = () => {
-        canvasWidth = img.naturalWidth || 960;
-        canvasHeight = img.naturalHeight || 540;
+        canvasWidth = img.naturalWidth || width || 960;
+        canvasHeight = img.naturalHeight || height || 540;
         if (canvasEl && ctx) {
           canvasEl.width = canvasWidth;
           canvasEl.height = canvasHeight;
@@ -60,6 +66,12 @@
       };
       img.src = imageUrl;
     } else {
+      canvasWidth = width || 960;
+      canvasHeight = height || 540;
+      if (canvasEl && ctx) {
+        canvasEl.width = canvasWidth;
+        canvasEl.height = canvasHeight;
+      }
       renderCanvas();
     }
   });
