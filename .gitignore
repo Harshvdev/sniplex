@@ -29,6 +29,9 @@ dist-ssr
 # Specifications & Plans
 plan.md
 misc
+.agents
+AGENTS.md
+GEMINI.md
 
 # Tauri build artifacts
 src-tauri/target/
