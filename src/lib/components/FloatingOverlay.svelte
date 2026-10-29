@@ -60,6 +60,24 @@
   let currentX = $state(0);
   let currentY = $state(0);
 
+  // Pill drag position state
+  let pillX = $state<number | null>(null);
+  let pillY = $state<number>(12);
+  let isDraggingPill = $state(false);
+  let dragOffset = $state({ x: 0, y: 0 });
+
+  function handlePillMouseDown(e: MouseEvent) {
+    const target = e.target as HTMLElement;
+    if (target.closest('button') || target.closest('input')) return;
+    isDraggingPill = true;
+    const pill = target.closest('.floating-pill') as HTMLElement;
+    const rect = pill.getBoundingClientRect();
+    dragOffset = {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+    };
+  }
+
   let selectionRect = $derived(
     isDragging
       ? {
@@ -104,12 +122,21 @@
   }
 
   function handleMouseMove(e: MouseEvent) {
+    if (isDraggingPill) {
+      pillX = Math.max(10, Math.min(window.innerWidth - 300, e.clientX - dragOffset.x));
+      pillY = Math.max(8, Math.min(window.innerHeight - 60, e.clientY - dragOffset.y));
+      return;
+    }
     if (!isDragging) return;
     currentX = e.clientX;
     currentY = e.clientY;
   }
 
   function handleMouseUp() {
+    if (isDraggingPill) {
+      isDraggingPill = false;
+      return;
+    }
     if (!isDragging) return;
     isDragging = false;
     if (selectionRect && selectionRect.w > 20 && selectionRect.h > 20) {
@@ -215,9 +242,14 @@
       <div class="absolute inset-0 bg-black/35 pointer-events-none transition-opacity duration-200"></div>
     {/if}
 
-    <!-- Floating capture toolbar pill (Matching Reference) -->
+    <!-- Floating capture toolbar pill (Matching Reference, Draggable) -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
-      class="floating-pill absolute top-3 left-1/2 -translate-x-1/2 z-50 flex items-center bg-[#fdfdfd] dark:bg-[#161b26] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_8px_32px_rgba(0,0,0,0.4)] rounded-[10px] p-1 gap-1 text-neutral-800 dark:text-neutral-100 cursor-default"
+      class="floating-pill fixed z-50 flex items-center bg-[#fdfdfd] dark:bg-[#161b26] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_8px_32px_rgba(0,0,0,0.4)] rounded-[10px] p-1 gap-1 text-neutral-800 dark:text-neutral-100 cursor-move"
+      style={pillX !== null
+        ? `left: ${pillX}px; top: ${pillY}px;`
+        : `left: 50%; top: ${pillY}px; transform: translateX(-50%);`}
+      onmousedown={handlePillMouseDown}
     >
       <!-- 1. Camera & Video Segmented Box -->
       <div class="flex items-center h-8 bg-black/[0.04] dark:bg-white/[0.06] rounded-[6px] p-0.5 border border-black/[0.05] dark:border-white/[0.05]">

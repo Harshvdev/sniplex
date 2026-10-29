@@ -165,7 +165,7 @@
           <!-- Light Theme -->
           <button
             type="button"
-            class="flex items-center justify-between px-3.5 py-2.5 rounded-md border text-left transition-colors cursor-pointer {theme === 'light' ? 'border-neutral-900 dark:border-white bg-neutral-100 dark:bg-neutral-800' : 'border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5'}"
+            class="flex items-center justify-between px-3.5 py-2.5 rounded-md border text-left transition-colors cursor-pointer outline-none focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0 {theme === 'light' ? 'border-neutral-900 dark:border-white bg-neutral-100 dark:bg-neutral-800' : 'border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5'}"
             onclick={() => onThemeChange('light')}
           >
             <div class="flex items-center gap-2.5">
@@ -185,7 +185,7 @@
           <!-- Dark Theme -->
           <button
             type="button"
-            class="flex items-center justify-between px-3.5 py-2.5 rounded-md border text-left transition-colors cursor-pointer {theme === 'dark' ? 'border-neutral-900 dark:border-white bg-neutral-100 dark:bg-neutral-800' : 'border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5'}"
+            class="flex items-center justify-between px-3.5 py-2.5 rounded-md border text-left transition-colors cursor-pointer outline-none focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0 {theme === 'dark' ? 'border-neutral-900 dark:border-white bg-neutral-100 dark:bg-neutral-800' : 'border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5'}"
             onclick={() => onThemeChange('dark')}
           >
             <div class="flex items-center gap-2.5">
@@ -205,7 +205,7 @@
           <!-- System Theme -->
           <button
             type="button"
-            class="flex items-center justify-between px-3.5 py-2.5 rounded-md border text-left transition-colors cursor-pointer {theme === 'system' ? 'border-neutral-900 dark:border-white bg-neutral-100 dark:bg-neutral-800' : 'border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5'}"
+            class="flex items-center justify-between px-3.5 py-2.5 rounded-md border text-left transition-colors cursor-pointer outline-none focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0 {theme === 'system' ? 'border-neutral-900 dark:border-white bg-neutral-100 dark:bg-neutral-800' : 'border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5'}"
             onclick={() => onThemeChange('system')}
           >
             <div class="flex items-center gap-2.5">

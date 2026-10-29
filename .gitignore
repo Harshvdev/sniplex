@@ -28,3 +28,9 @@ dist-ssr
 
 # Specifications & Plans
 plan.md
+misc
+
+# Tauri build artifacts
+src-tauri/target/
+src-tauri/gen/schemas/
+

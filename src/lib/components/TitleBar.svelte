@@ -18,16 +18,48 @@
     onCloseTab: (id: string) => void;
     onNewTab: () => void;
   } = $props();
+
+  async function handleMinimize() {
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      await getCurrentWindow().minimize();
+    } catch (e) {
+      console.warn('Minimize only available in desktop environment', e);
+    }
+  }
+
+  async function handleToggleMaximize() {
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      await getCurrentWindow().toggleMaximize();
+    } catch (e) {
+      console.warn('Maximize only available in desktop environment', e);
+    }
+  }
+
+  async function handleClose() {
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      await getCurrentWindow().close();
+    } catch (e) {
+      window.close();
+    }
+  }
 </script>
 
-<div class="h-10 border-b border-black/[0.06] dark:border-white/[0.07] bg-[#f9fafb] dark:bg-[#131720] flex items-center justify-between px-2 select-none transition-colors duration-150">
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div
+  data-tauri-drag-region
+  ondblclick={handleToggleMaximize}
+  class="h-10 border-b border-black/[0.06] dark:border-white/[0.07] bg-[#f9fafb] dark:bg-[#131720] flex items-center justify-between px-2 select-none transition-colors duration-150 cursor-default"
+>
   <!-- Left: App Icon & Tab Strip -->
-  <div class="flex items-center gap-1 overflow-x-auto no-scrollbar max-w-[75%]">
-    <div class="flex items-center px-1.5 py-1 mr-1">
+  <div class="flex items-center gap-1 overflow-x-auto no-scrollbar max-w-[70%]" data-tauri-drag-region>
+    <div class="flex items-center px-1.5 py-1 mr-1 select-none pointer-events-none">
       <SniplexLogo size={18} showText={true} />
     </div>
 
-    <!-- Tabs Strip -->
+    <!-- Tabs Strip (if any tabs are open) -->
     {#each tabs as tab}
       <div
         role="button"
@@ -50,24 +82,18 @@
         </button>
       </div>
     {/each}
-
-    <!-- New Tab (+) Button -->
-    <button
-      type="button"
-      class="w-7 h-7 rounded-[5px] flex items-center justify-center text-neutral-600 dark:text-neutral-400 hover:bg-black/[0.06] dark:hover:bg-white/[0.06] hover:text-neutral-900 dark:hover:text-neutral-100 transition-colors"
-      onclick={onNewTab}
-      title="New tab (Ctrl+T)"
-    >
-      <Plus class="w-3.5 h-3.5 stroke-[2]" />
-    </button>
   </div>
+
+  <!-- Draggable spacer area -->
+  <div class="flex-1 h-full" data-tauri-drag-region></div>
 
   <!-- Right: Window Controls (Minimize, Maximize, Close) -->
   <div class="flex items-center">
     <!-- Minimize -->
     <button
       type="button"
-      class="w-10 h-8 flex items-center justify-center text-neutral-600 dark:text-neutral-400 hover:bg-black/[0.06] dark:hover:bg-white/[0.06] transition-colors"
+      class="w-10 h-8 flex items-center justify-center text-neutral-600 dark:text-neutral-400 hover:bg-black/[0.06] dark:hover:bg-white/[0.06] transition-colors cursor-pointer"
+      onclick={handleMinimize}
       title="Minimize"
     >
       <Minus class="w-3.5 h-3.5 stroke-[1.8]" />
@@ -76,7 +102,8 @@
     <!-- Maximize / Restore -->
     <button
       type="button"
-      class="w-10 h-8 flex items-center justify-center text-neutral-600 dark:text-neutral-400 hover:bg-black/[0.06] dark:hover:bg-white/[0.06] transition-colors"
+      class="w-10 h-8 flex items-center justify-center text-neutral-600 dark:text-neutral-400 hover:bg-black/[0.06] dark:hover:bg-white/[0.06] transition-colors cursor-pointer"
+      onclick={handleToggleMaximize}
       title="Maximize"
     >
       <Square class="w-3 h-3 stroke-[1.8]" />
@@ -85,7 +112,8 @@
     <!-- Close Window -->
     <button
       type="button"
-      class="w-10 h-8 flex items-center justify-center text-neutral-600 dark:text-neutral-400 hover:bg-[#c42b1c] hover:text-white transition-colors"
+      class="w-10 h-8 flex items-center justify-center text-neutral-600 dark:text-neutral-400 hover:bg-[#c42b1c] hover:text-white transition-colors cursor-pointer"
+      onclick={handleClose}
       title="Close"
     >
       <X class="w-3.5 h-3.5 stroke-[1.8]" />

@@ -62,6 +62,7 @@
     onOpenFile = () => {},
     onToggleCrop = () => {},
     onClearAll = () => {},
+    onTriggerOcr = () => {},
   }: {
     mode: CaptureMode;
     snipType: SnipType;
@@ -92,6 +93,7 @@
     onOpenFile: () => void;
     onToggleCrop: () => void;
     onClearAll: () => void;
+    onTriggerOcr?: () => void;
   } = $props();
 
   // Active popovers
@@ -235,6 +237,16 @@
         </div>
       {/if}
     </div>
+
+    <!-- 5. OCR Text Actions Icon (Next to Timer on Homescreen) -->
+    <button
+      type="button"
+      class="h-8 flex items-center justify-center px-2 rounded-[6px] hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-transparent hover:border-black/[0.05] dark:hover:border-white/[0.05] transition-colors text-xs text-neutral-700 dark:text-neutral-300 cursor-pointer"
+      onclick={onTriggerOcr}
+      title="Text actions / OCR (Super+Shift+T)"
+    >
+      <ScanText class="w-4 h-4 text-neutral-700 dark:text-neutral-300 stroke-[1.8]" />
+    </button>
   </div>
 
   <!-- CENTER: Annotation & Editing Markup Tools -->
