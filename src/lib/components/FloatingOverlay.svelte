@@ -67,6 +67,19 @@
     currentMode = mode;
     currentSnipType = snipType;
     currentDelay = delay;
+
+    if (!active) {
+      isDragging = false;
+      isDraggingPill = false;
+      freeformPoints = [];
+      startX = 0;
+      startY = 0;
+      currentX = 0;
+      currentY = 0;
+      hoveredWindow = null;
+      isSnipMenuOpen = false;
+      isDelayMenuOpen = false;
+    }
   });
 
   // Image element for frozen display buffer
@@ -420,6 +433,8 @@
 
 <svelte:window
   onpointerdown={handleWindowPointerDown}
+  onmousemove={active ? handleMouseMove : undefined}
+  onmouseup={active ? handleMouseUp : undefined}
   onkeydown={(e) => {
     if (e.key === 'Escape') {
       if (isSnipMenuOpen || isDelayMenuOpen) {
@@ -530,11 +545,12 @@
 
     <!-- Dimension Badge (Rectangle Mode) -->
     {#if currentSnipType === 'rectangle' && selectionRect !== null}
+      {@const { scaleX, scaleY } = getScale()}
       <div
         class="absolute pointer-events-none bg-black/80 text-white text-[11px] font-mono px-2 py-0.5 rounded shadow-md border border-white/10"
-        style="left: {selectionRect.x + selectionRect.w / 2 - 40}px; top: {selectionRect.y + selectionRect.h + 8}px;"
+        style="left: {selectionRect.x + selectionRect.w / 2 - 40}px; top: {Math.min(window.innerHeight - 30, selectionRect.y + selectionRect.h + 8)}px;"
       >
-        {selectionRect.w} × {selectionRect.h}
+        {Math.round(selectionRect.w * scaleX)} × {Math.round(selectionRect.h * scaleY)}
       </div>
     {/if}
 

@@ -58,19 +58,27 @@
       img.onload = () => {
         canvasWidth = img.naturalWidth || width || 960;
         canvasHeight = img.naturalHeight || height || 540;
-        if (canvasEl && ctx) {
-          canvasEl.width = canvasWidth;
-          canvasEl.height = canvasHeight;
-          ctx.drawImage(img, 0, 0);
+        if (canvasEl) {
+          const context = ctx || canvasEl.getContext('2d');
+          if (context) {
+            ctx = context;
+            canvasEl.width = canvasWidth;
+            canvasEl.height = canvasHeight;
+            context.drawImage(img, 0, 0);
+          }
         }
       };
       img.src = imageUrl;
     } else {
       canvasWidth = width || 960;
       canvasHeight = height || 540;
-      if (canvasEl && ctx) {
-        canvasEl.width = canvasWidth;
-        canvasEl.height = canvasHeight;
+      if (canvasEl) {
+        const context = ctx || canvasEl.getContext('2d');
+        if (context) {
+          ctx = context;
+          canvasEl.width = canvasWidth;
+          canvasEl.height = canvasHeight;
+        }
       }
       renderCanvas();
     }

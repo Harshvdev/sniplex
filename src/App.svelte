@@ -148,13 +148,27 @@
   }
 
   let desktopCapture = $state<DesktopCapture | null>(null);
+  let wasWindowMaximized = $state(true);
   let countdown = $state<number | null>(null);
   let countdownTimer: number | null = null;
 
   async function startCaptureFlow() {
     try {
-      desktopCapture = await captureDesktopDisplay();
-      isOverlayActive = true;
+      const res = await captureDesktopDisplay();
+      desktopCapture = res.capture;
+      wasWindowMaximized = res.wasMaximized;
+
+      // In Full-Screen mode, capture instantly without requiring an extra click
+      if (snipType === 'fullscreen') {
+        await handleCapture({
+          imageUrl: res.capture.image_data_url,
+          width: res.capture.width,
+          height: res.capture.height,
+          mode: 'fullscreen',
+        });
+      } else {
+        isOverlayActive = true;
+      }
     } catch (err) {
       console.warn('Capture acquisition error:', err);
       isOverlayActive = true;
@@ -189,14 +203,14 @@
   async function handleCloseOverlay() {
     isOverlayActive = false;
     desktopCapture = null;
-    await restoreDesktopWindow();
+    await restoreDesktopWindow(wasWindowMaximized);
   }
 
   async function handleCapture(
     payload: CapturePayload | { x?: number; y?: number; w?: number; h?: number; imageUrl?: string; width?: number; height?: number }
   ) {
     isOverlayActive = false;
-    await restoreDesktopWindow();
+    await restoreDesktopWindow(wasWindowMaximized);
     view = 'editor';
     const newId = `tab-${Date.now()}`;
 
@@ -273,11 +287,12 @@
     if (fullscreenShortcut && matchesShortcut(e, fullscreenShortcut.keys)) {
       e.preventDefault();
       snipType = 'fullscreen';
-      captureDesktopDisplay().then((cap) => {
+      captureDesktopDisplay().then((res) => {
+        wasWindowMaximized = res.wasMaximized;
         handleCapture({
-          imageUrl: cap.image_data_url,
-          width: cap.width,
-          height: cap.height,
+          imageUrl: res.capture.image_data_url,
+          width: res.capture.width,
+          height: res.capture.height,
           mode: 'fullscreen',
         });
       });

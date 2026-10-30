@@ -84,8 +84,9 @@ pub fn parse_wmctrl_line(line: &str) -> Option<WindowRect> {
     None
 }
 
-pub fn detect_desktop_windows() -> Vec<WindowRect> {
+pub fn detect_desktop_windows(scale_factor: f64) -> Vec<WindowRect> {
     let mut windows = Vec::new();
+    let scale = if scale_factor > 0.1 { scale_factor } else { 1.0 };
 
     // 1. Try kdotool (KDE Wayland / X11)
     if let Ok(search_output) = Command::new("kdotool").args(["search", ""]).output() {
@@ -104,8 +105,9 @@ pub fn detect_desktop_windows() -> Vec<WindowRect> {
                     }
                 }
 
-                // Exclude Sniplex itself
-                if title.to_lowercase().contains("sniplex") {
+                // Exclude Sniplex itself (exact match or window title prefix)
+                let trimmed_title = title.trim();
+                if trimmed_title == "Sniplex" || trimmed_title.starts_with("Sniplex -") {
                     continue;
                 }
 
@@ -117,10 +119,10 @@ pub fn detect_desktop_windows() -> Vec<WindowRect> {
                                 windows.push(WindowRect {
                                     id: id.to_string(),
                                     title,
-                                    x,
-                                    y,
-                                    width,
-                                    height,
+                                    x: (x as f64 * scale).round() as i32,
+                                    y: (y as f64 * scale).round() as i32,
+                                    width: (width as f64 * scale).round() as u32,
+                                    height: (height as f64 * scale).round() as u32,
                                 });
                             }
                         }
@@ -136,8 +138,13 @@ pub fn detect_desktop_windows() -> Vec<WindowRect> {
             if wm_out.status.success() {
                 let list_str = String::from_utf8_lossy(&wm_out.stdout);
                 for line in list_str.lines() {
-                    if let Some(rect) = parse_wmctrl_line(line) {
-                        if !rect.title.to_lowercase().contains("sniplex") {
+                    if let Some(mut rect) = parse_wmctrl_line(line) {
+                        let trimmed = rect.title.trim();
+                        if trimmed != "Sniplex" && !trimmed.starts_with("Sniplex -") {
+                            rect.x = (rect.x as f64 * scale).round() as i32;
+                            rect.y = (rect.y as f64 * scale).round() as i32;
+                            rect.width = (rect.width as f64 * scale).round() as u32;
+                            rect.height = (rect.height as f64 * scale).round() as u32;
                             windows.push(rect);
                         }
                     }
@@ -150,7 +157,7 @@ pub fn detect_desktop_windows() -> Vec<WindowRect> {
 }
 
 fn execute_screen_grab(output_path: &str) -> bool {
-    // 1. Try spectacle background capture
+    // 1. Try spectacle background capture (KDE Plasma)
     if let Ok(status) = Command::new("spectacle")
         .args(["-b", "-n", "-o", output_path])
         .status()
@@ -164,7 +171,21 @@ fn execute_screen_grab(output_path: &str) -> bool {
         }
     }
 
-    // 2. Try grim (wlroots-based Wayland compositors)
+    // 2. Try gnome-screenshot (GNOME on Wayland or X11)
+    if let Ok(status) = Command::new("gnome-screenshot")
+        .args(["-f", output_path])
+        .status()
+    {
+        if status.success() {
+            if let Ok(meta) = fs::metadata(output_path) {
+                if meta.len() > 0 {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // 3. Try grim (wlroots-based Wayland compositors: Sway, Hyprland, Wayfire)
     if let Ok(status) = Command::new("grim").arg(output_path).status() {
         if status.success() {
             if let Ok(meta) = fs::metadata(output_path) {
@@ -175,7 +196,7 @@ fn execute_screen_grab(output_path: &str) -> bool {
         }
     }
 
-    // 3. Try maim (X11)
+    // 4. Try maim (X11)
     if let Ok(status) = Command::new("maim").arg(output_path).status() {
         if status.success() {
             if let Ok(meta) = fs::metadata(output_path) {
@@ -186,7 +207,7 @@ fn execute_screen_grab(output_path: &str) -> bool {
         }
     }
 
-    // 4. Try scrot (X11)
+    // 5. Try scrot (X11)
     if let Ok(status) = Command::new("scrot").arg(output_path).status() {
         if status.success() {
             if let Ok(meta) = fs::metadata(output_path) {
@@ -197,7 +218,7 @@ fn execute_screen_grab(output_path: &str) -> bool {
         }
     }
 
-    // 5. Try ImageMagick import (X11)
+    // 6. Try ImageMagick import (X11)
     if let Ok(status) = Command::new("import")
         .args(["-window", "root", output_path])
         .status()
@@ -216,10 +237,10 @@ fn execute_screen_grab(output_path: &str) -> bool {
 
 #[tauri::command]
 fn capture_desktop(window: tauri::Window) -> Result<DesktopCapture, String> {
-    // 1. Ensure window is marked maximized and hide before display freeze
-    let _ = window.maximize();
+    // 1. Immediately hide window so Sniplex vanishes completely before capturing
     let _ = window.hide();
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    // Allow display compositor time to unmap window and clear animations
+    std::thread::sleep(std::time::Duration::from_millis(280));
 
     // 2. Prepare temp path
     let timestamp = std::time::SystemTime::now()
@@ -241,14 +262,13 @@ fn capture_desktop(window: tauri::Window) -> Result<DesktopCapture, String> {
     let _ = fs::remove_file(&temp_path);
 
     let (width, height) = parse_png_dimensions(&bytes).unwrap_or((1920, 1080));
-    let windows = detect_desktop_windows();
+    let scale_factor = window.scale_factor().unwrap_or(1.0);
+    let windows = detect_desktop_windows(scale_factor);
     let image_data_url = format!("data:image/png;base64,{}", BASE64_STANDARD.encode(&bytes));
 
-    // 3. Map window to screen and enter fullscreen capture overlay
-    let _ = window.maximize();
-    let _ = window.show();
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // 3. Map window directly to fullscreen capture overlay
     let _ = window.set_fullscreen(true);
+    let _ = window.show();
     let _ = window.set_focus();
 
     Ok(DesktopCapture {
@@ -260,26 +280,26 @@ fn capture_desktop(window: tauri::Window) -> Result<DesktopCapture, String> {
 }
 
 #[tauri::command]
-fn restore_window(window: tauri::Window) -> Result<(), String> {
+fn restore_window(window: tauri::Window, was_maximized: Option<bool>) -> Result<(), String> {
     let _ = window.set_fullscreen(false);
-    // Allow the display compositor time to process unfullscreen before maximizing
-    std::thread::sleep(std::time::Duration::from_millis(150));
-    let _ = window.maximize();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    if was_maximized.unwrap_or(true) {
+        let _ = window.maximize();
+    } else {
+        let _ = window.unmaximize();
+    }
+
     let _ = window.show();
     let _ = window.set_focus();
-
-    // Verify maximize took effect; if not, re-apply after another short interval
-    if let Ok(false) = window.is_maximized() {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let _ = window.maximize();
-    }
 
     Ok(())
 }
 
 #[tauri::command]
-fn get_detected_windows() -> Result<Vec<WindowRect>, String> {
-    Ok(detect_desktop_windows())
+fn get_detected_windows(window: tauri::Window) -> Result<Vec<WindowRect>, String> {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    Ok(detect_desktop_windows(scale))
 }
 
 #[tauri::command]

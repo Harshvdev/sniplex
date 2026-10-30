@@ -184,28 +184,29 @@ export function cropFreeformFromDataUrl(
 
 /**
  * Requests desktop display acquisition and display freeze from the Tauri backend,
- * or gracefully generates a fallback mock surface in pure browser environments.
+ * immediately hiding the Sniplex application window so that desktop contents are clean.
  */
-export async function captureDesktopDisplay(): Promise<DesktopCapture> {
+export async function captureDesktopDisplay(): Promise<{ capture: DesktopCapture; wasMaximized: boolean }> {
+  let wasMaximized = true;
+
   if (isTauriEnvironment()) {
     try {
       const { getCurrentWindow } = await import('@tauri-apps/api/window');
       const win = getCurrentWindow();
-      // Ensure the window is genuinely maximized before entering capture overlay
-      if (!(await win.isMaximized())) {
-        await win.maximize();
-        await new Promise((resolve) => setTimeout(resolve, 80));
-      }
+      wasMaximized = await win.isMaximized();
+
+      // Immediately hide the window from the desktop before triggering screen grab
+      await win.hide();
 
       const { invoke } = await import('@tauri-apps/api/core');
       const capture = await invoke<DesktopCapture>('capture_desktop');
-      return capture;
+      return { capture, wasMaximized };
     } catch (err) {
       console.warn('Native desktop capture error:', err);
     }
   }
 
-  // Fallback for non-native browser environment / testing
+  // Fallback for non-native test environments
   const fallbackCanvas = document.createElement('canvas');
   fallbackCanvas.width = window.innerWidth || 1920;
   fallbackCanvas.height = window.innerHeight || 1080;
@@ -219,43 +220,49 @@ export async function captureDesktopDisplay(): Promise<DesktopCapture> {
   }
 
   return {
-    image_data_url: fallbackCanvas.toDataURL('image/png'),
-    width: fallbackCanvas.width,
-    height: fallbackCanvas.height,
-    windows: [
-      {
-        id: 'mock-window-1',
-        title: 'Active Document',
-        x: 100,
-        y: 100,
-        width: 800,
-        height: 500,
-      },
-    ],
+    capture: {
+      image_data_url: fallbackCanvas.toDataURL('image/png'),
+      width: fallbackCanvas.width,
+      height: fallbackCanvas.height,
+      windows: [
+        {
+          id: 'mock-window-1',
+          title: 'Active Document',
+          x: 100,
+          y: 100,
+          width: 800,
+          height: 500,
+        },
+      ],
+    },
+    wasMaximized: true,
   };
 }
 
 /**
- * Restores the desktop window from fullscreen capture overlay back to standard editor window.
+ * Restores the desktop window from fullscreen capture overlay back to standard editor window,
+ * preserving whether the window was originally maximized or floating.
  */
-export async function restoreDesktopWindow(): Promise<void> {
+export async function restoreDesktopWindow(wasMaximized: boolean = true): Promise<void> {
   if (isTauriEnvironment()) {
     try {
       const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('restore_window');
+      await invoke('restore_window', { wasMaximized });
 
       const { getCurrentWindow } = await import('@tauri-apps/api/window');
       const win = getCurrentWindow();
 
-      // Ensure the window manager properly applies the maximized state after exiting fullscreen
-      for (let attempt = 0; attempt < 4; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 80));
-        const isMax = await win.isMaximized();
-        if (!isMax) {
-          await win.maximize();
-        } else {
-          break;
+      if (wasMaximized) {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 60));
+          if (!(await win.isMaximized())) {
+            await win.maximize();
+          } else {
+            break;
+          }
         }
+      } else {
+        await win.unmaximize();
       }
     } catch (err) {
       console.warn('Failed to restore desktop window:', err);
