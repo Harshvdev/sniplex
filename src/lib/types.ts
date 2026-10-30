@@ -31,5 +31,28 @@ export interface TabItem {
   timestamp: string;
 }
 
+export interface WindowRect {
+  id: string;
+  title: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface DesktopCapture {
+  image_data_url: string;
+  width: number;
+  height: number;
+  windows: WindowRect[];
+}
+
+export interface CapturePayload {
+  imageUrl: string;
+  width: number;
+  height: number;
+  mode: SnipType;
+}
+
 export type { ShortcutItem } from './shortcuts';
 

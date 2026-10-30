@@ -11,13 +11,28 @@
     Check,
   } from '@lucide/svelte';
   import SnipIcons from '../icons/SnipIcons.svelte';
-  import type { CaptureMode, SnipType, SnipDelay } from '../types';
+  import type {
+    CaptureMode,
+    SnipType,
+    SnipDelay,
+    DesktopCapture,
+    WindowRect,
+    CapturePayload,
+  } from '../types';
+  import {
+    findHoveredWindow,
+    cropRectangle,
+    cropFreeform,
+    cropFromDataUrl,
+    cropFreeformFromDataUrl,
+  } from '../capture';
 
   let {
     active = false,
     mode = 'snip',
     snipType = 'rectangle',
     delay = 0,
+    desktopCapture = null,
     onClose = () => {},
     onCapture = () => {},
     onModeChange = (m: CaptureMode) => {},
@@ -31,8 +46,9 @@
     mode: CaptureMode;
     snipType: SnipType;
     delay?: SnipDelay;
+    desktopCapture?: DesktopCapture | null;
     onClose: () => void;
-    onCapture: (rect: { x: number; y: number; w: number; h: number }) => void;
+    onCapture: (payload: CapturePayload) => void;
     onModeChange?: (m: CaptureMode) => void;
     onSnipTypeChange?: (t: SnipType) => void;
     onDelayChange?: (d: SnipDelay) => void;
@@ -53,6 +69,22 @@
     currentDelay = delay;
   });
 
+  // Image element for frozen display buffer
+  let frozenImgEl = $state<HTMLImageElement | null>(null);
+  let preloadedImg = $state<HTMLImageElement | null>(null);
+
+  $effect(() => {
+    if (desktopCapture?.image_data_url) {
+      const img = new Image();
+      img.onload = () => {
+        preloadedImg = img;
+      };
+      img.src = desktopCapture.image_data_url;
+    } else {
+      preloadedImg = null;
+    }
+  });
+
   // Drag-to-snip interaction state
   let isDragging = $state(false);
   let startX = $state(0);
@@ -60,11 +92,37 @@
   let currentX = $state(0);
   let currentY = $state(0);
 
+  // Freeform lasso points
+  let freeformPoints = $state<Array<{ x: number; y: number }>>([]);
+
+  // Window Mode hover detection
+  let hoveredWindow = $state<WindowRect | null>(null);
+
   // Pill drag position state
   let pillX = $state<number | null>(null);
   let pillY = $state<number>(12);
   let isDraggingPill = $state(false);
   let dragOffset = $state({ x: 0, y: 0 });
+
+  function getScale() {
+    if (!desktopCapture) return { scaleX: 1, scaleY: 1 };
+    const winW = window.innerWidth || desktopCapture.width || 1920;
+    const winH = window.innerHeight || desktopCapture.height || 1080;
+    const scaleX = (desktopCapture.width || winW) / winW;
+    const scaleY = (desktopCapture.height || winH) / winH;
+    return { scaleX, scaleY };
+  }
+
+  let clientHoveredWindow = $derived.by(() => {
+    if (!hoveredWindow) return null;
+    const { scaleX, scaleY } = getScale();
+    return {
+      x: hoveredWindow.x / scaleX,
+      y: hoveredWindow.y / scaleY,
+      w: hoveredWindow.width / scaleX,
+      h: hoveredWindow.height / scaleY,
+    };
+  });
 
   function handlePillMouseDown(e: MouseEvent) {
     const target = e.target as HTMLElement;
@@ -79,7 +137,7 @@
   }
 
   let selectionRect = $derived(
-    isDragging
+    isDragging && currentSnipType === 'rectangle'
       ? {
           x: Math.min(startX, currentX),
           y: Math.min(startY, currentY),
@@ -114,6 +172,48 @@
     }
   }
 
+  function executeFullscreenCapture() {
+    onCapture({
+      imageUrl: desktopCapture?.image_data_url || '',
+      width: desktopCapture?.width || window.innerWidth,
+      height: desktopCapture?.height || window.innerHeight,
+      mode: 'fullscreen',
+    });
+  }
+
+  async function executeWindowCapture(win: WindowRect) {
+    let cropped = '';
+    const sourceImg = preloadedImg || frozenImgEl;
+    if (sourceImg && sourceImg.complete && sourceImg.naturalWidth > 0) {
+      try {
+        cropped = cropRectangle(sourceImg, {
+          x: win.x,
+          y: win.y,
+          w: win.width,
+          h: win.height,
+        });
+      } catch (err) {
+        console.error('Failed to crop window frame from source image:', err);
+      }
+    }
+
+    if (!cropped && desktopCapture?.image_data_url) {
+      cropped = await cropFromDataUrl(desktopCapture.image_data_url, {
+        x: win.x,
+        y: win.y,
+        w: win.width,
+        h: win.height,
+      });
+    }
+
+    onCapture({
+      imageUrl: cropped || (desktopCapture?.image_data_url ?? ''),
+      width: win.width,
+      height: win.height,
+      mode: 'window',
+    });
+  }
+
   function handleMouseDown(e: MouseEvent) {
     const target = e.target as HTMLElement;
     if (target.closest('.floating-pill')) return;
@@ -125,7 +225,22 @@
     }
 
     if (currentSnipType === 'fullscreen') {
-      onCapture({ x: 0, y: 0, w: window.innerWidth, h: window.innerHeight });
+      executeFullscreenCapture();
+      return;
+    }
+
+    if (currentSnipType === 'window') {
+      if (hoveredWindow) {
+        executeWindowCapture(hoveredWindow);
+      } else {
+        executeFullscreenCapture();
+      }
+      return;
+    }
+
+    if (currentSnipType === 'freeform') {
+      isDragging = true;
+      freeformPoints = [{ x: e.clientX, y: e.clientY }];
       return;
     }
 
@@ -144,20 +259,116 @@
       pillY = Math.max(8, Math.min(window.innerHeight - 60, e.clientY - dragOffset.y));
       return;
     }
+
+    if (currentSnipType === 'window') {
+      if (desktopCapture && desktopCapture.windows.length > 0) {
+        const { scaleX, scaleY } = getScale();
+        hoveredWindow = findHoveredWindow(
+          desktopCapture.windows,
+          e.clientX * scaleX,
+          e.clientY * scaleY
+        );
+      }
+      return;
+    }
+
     if (!isDragging) return;
+
+    if (currentSnipType === 'freeform') {
+      freeformPoints = [...freeformPoints, { x: e.clientX, y: e.clientY }];
+      return;
+    }
+
     currentX = e.clientX;
     currentY = e.clientY;
   }
 
-  function handleMouseUp() {
+  async function handleMouseUp() {
     if (isDraggingPill) {
       isDraggingPill = false;
       return;
     }
     if (!isDragging) return;
-    isDragging = false;
-    if (selectionRect && selectionRect.w > 20 && selectionRect.h > 20) {
-      onCapture(selectionRect);
+
+    if (currentSnipType === 'rectangle') {
+      const rect = {
+        x: Math.min(startX, currentX),
+        y: Math.min(startY, currentY),
+        w: Math.abs(currentX - startX),
+        h: Math.abs(currentY - startY),
+      };
+      isDragging = false;
+
+      if (rect.w > 10 && rect.h > 10) {
+        const { scaleX, scaleY } = getScale();
+        const scaledRect = {
+          x: rect.x * scaleX,
+          y: rect.y * scaleY,
+          w: rect.w * scaleX,
+          h: rect.h * scaleY,
+        };
+
+        let cropped = '';
+        const sourceImg = preloadedImg || frozenImgEl;
+        if (sourceImg && sourceImg.complete && sourceImg.naturalWidth > 0) {
+          try {
+            cropped = cropRectangle(sourceImg, scaledRect);
+          } catch (err) {
+            console.error('Failed to crop rectangle from source image:', err);
+          }
+        }
+
+        if (!cropped && desktopCapture?.image_data_url) {
+          cropped = await cropFromDataUrl(desktopCapture.image_data_url, scaledRect);
+        }
+
+        onCapture({
+          imageUrl: cropped || (desktopCapture?.image_data_url ?? ''),
+          width: Math.round(scaledRect.w),
+          height: Math.round(scaledRect.h),
+          mode: 'rectangle',
+        });
+      }
+    } else if (currentSnipType === 'freeform') {
+      const pts = [...freeformPoints];
+      isDragging = false;
+      freeformPoints = [];
+
+      if (pts.length >= 3) {
+        const { scaleX, scaleY } = getScale();
+        const scaledPoints = pts.map((p) => ({
+          x: p.x * scaleX,
+          y: p.y * scaleY,
+        }));
+
+        let cropResult = { dataUrl: '', width: 0, height: 0 };
+        const sourceImg = preloadedImg || frozenImgEl;
+        if (sourceImg && sourceImg.complete && sourceImg.naturalWidth > 0) {
+          try {
+            cropResult = cropFreeform(sourceImg, scaledPoints);
+          } catch (err) {
+            console.error('Failed to crop freeform from source image:', err);
+          }
+        }
+
+        if (!cropResult.dataUrl && desktopCapture?.image_data_url) {
+          cropResult = await cropFreeformFromDataUrl(
+            desktopCapture.image_data_url,
+            scaledPoints
+          );
+        }
+
+        if (cropResult.dataUrl) {
+          onCapture({
+            imageUrl: cropResult.dataUrl,
+            width: cropResult.width,
+            height: cropResult.height,
+            mode: 'freeform',
+          });
+        }
+      }
+    } else {
+      isDragging = false;
     }
   }
 
@@ -166,7 +377,7 @@
     onSnipTypeChange(type);
     isSnipMenuOpen = false;
     if (type === 'fullscreen') {
-      onCapture({ x: 0, y: 0, w: window.innerWidth, h: window.innerHeight });
+      executeFullscreenCapture();
     }
   }
 
@@ -178,7 +389,7 @@
 
   function handleScreenDrawClick() {
     onScreenDraw();
-    onCapture({ x: 0, y: 0, w: window.innerWidth, h: window.innerHeight });
+    executeFullscreenCapture();
   }
 
   async function handleColorPickerClick() {
@@ -197,13 +408,13 @@
       }
     } else {
       onColorPicker();
-      onCapture({ x: 0, y: 0, w: window.innerWidth, h: window.innerHeight });
+      executeFullscreenCapture();
     }
   }
 
   function handleTextActionsClick() {
     onTextActions();
-    onCapture({ x: 0, y: 0, w: window.innerWidth, h: window.innerHeight });
+    executeFullscreenCapture();
   }
 </script>
 
@@ -226,27 +437,61 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="fixed inset-0 z-50 select-none cursor-crosshair overflow-hidden"
+    style="cursor: crosshair !important;"
     onmousedown={handleMouseDown}
     onmousemove={handleMouseMove}
     onmouseup={handleMouseUp}
   >
-    <!-- Darkened translucent background with cutout -->
-    {#if selectionRect !== null}
-      <!-- SVG overlay for transparent cutout box -->
-      <svg class="absolute inset-0 w-full h-full pointer-events-none">
-        <defs>
-          <mask id="snip-cutout-mask">
-            <rect width="100%" height="100%" fill="white" />
-            <rect x={selectionRect.x} y={selectionRect.y} width={selectionRect.w} height={selectionRect.h} fill="black" />
-          </mask>
-        </defs>
-        <rect
-          width="100%"
-          height="100%"
-          fill="rgba(0, 0, 0, 0.4)"
-          mask="url(#snip-cutout-mask)"
-        />
-        <!-- Active crisp blue selection border -->
+    <!-- Frozen display screenshot layer -->
+    {#if desktopCapture?.image_data_url}
+      <img
+        bind:this={frozenImgEl}
+        src={desktopCapture.image_data_url}
+        alt=""
+        class="absolute inset-0 w-full h-full object-fill pointer-events-none select-none"
+      />
+    {/if}
+
+    <!-- SVG Mask with live shape cutouts -->
+    <svg class="absolute inset-0 w-full h-full pointer-events-none">
+      <defs>
+        <mask id="snip-cutout-mask">
+          <rect width="100%" height="100%" fill="white" />
+          {#if currentSnipType === 'rectangle' && selectionRect !== null}
+            <rect
+              x={selectionRect.x}
+              y={selectionRect.y}
+              width={selectionRect.w}
+              height={selectionRect.h}
+              fill="black"
+            />
+          {:else if currentSnipType === 'freeform' && freeformPoints.length > 2}
+            <polygon
+              points={freeformPoints.map((p) => `${p.x},${p.y}`).join(' ')}
+              fill="black"
+            />
+          {:else if currentSnipType === 'window' && clientHoveredWindow !== null}
+            <rect
+              x={clientHoveredWindow.x}
+              y={clientHoveredWindow.y}
+              width={clientHoveredWindow.w}
+              height={clientHoveredWindow.h}
+              fill="black"
+            />
+          {/if}
+        </mask>
+      </defs>
+
+      <!-- Translucent darkened background with cutout mask -->
+      <rect
+        width="100%"
+        height="100%"
+        fill="rgba(0, 0, 0, 0.45)"
+        mask="url(#snip-cutout-mask)"
+      />
+
+      <!-- Rectangle Mode Border -->
+      {#if currentSnipType === 'rectangle' && selectionRect !== null}
         <rect
           x={selectionRect.x}
           y={selectionRect.y}
@@ -256,17 +501,51 @@
           stroke="#0067c0"
           stroke-width="1.5"
         />
-      </svg>
+      {/if}
 
-      <!-- Resolution dimension badge -->
+      <!-- Freeform Mode Path -->
+      {#if currentSnipType === 'freeform' && freeformPoints.length > 1}
+        <polyline
+          points={freeformPoints.map((p) => `${p.x},${p.y}`).join(' ')}
+          fill="none"
+          stroke="#0067c0"
+          stroke-width="2"
+          stroke-dasharray="4 2"
+        />
+      {/if}
+
+      <!-- Window Mode Accent Frame & Tint -->
+      {#if currentSnipType === 'window' && clientHoveredWindow !== null}
+        <rect
+          x={clientHoveredWindow.x}
+          y={clientHoveredWindow.y}
+          width={clientHoveredWindow.w}
+          height={clientHoveredWindow.h}
+          fill="rgba(0, 103, 192, 0.12)"
+          stroke="#0067c0"
+          stroke-width="2"
+        />
+      {/if}
+    </svg>
+
+    <!-- Dimension Badge (Rectangle Mode) -->
+    {#if currentSnipType === 'rectangle' && selectionRect !== null}
       <div
         class="absolute pointer-events-none bg-black/80 text-white text-[11px] font-mono px-2 py-0.5 rounded shadow-md border border-white/10"
         style="left: {selectionRect.x + selectionRect.w / 2 - 40}px; top: {selectionRect.y + selectionRect.h + 8}px;"
       >
         {selectionRect.w} × {selectionRect.h}
       </div>
-    {:else}
-      <div class="absolute inset-0 bg-black/35 pointer-events-none transition-opacity duration-200"></div>
+    {/if}
+
+    <!-- Window Badge (Window Mode) -->
+    {#if currentSnipType === 'window' && clientHoveredWindow !== null && hoveredWindow !== null}
+      <div
+        class="absolute pointer-events-none bg-black/85 text-white text-[11px] font-medium px-2 py-0.5 rounded shadow-md border border-white/15 max-w-[320px] truncate"
+        style="left: {Math.max(12, clientHoveredWindow.x)}px; top: {Math.max(12, clientHoveredWindow.y - 26)}px;"
+      >
+        {hoveredWindow.title || 'Application Window'} ({Math.round(hoveredWindow.width)} × {Math.round(hoveredWindow.height)})
+      </div>
     {/if}
 
     <!-- Floating capture toolbar pill (Matching Reference, Draggable) -->

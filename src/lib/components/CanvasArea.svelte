@@ -88,18 +88,20 @@
   function startDrawing(e: MouseEvent) {
     if (isCropping || !ctx || !canvasEl) return;
     const rect = canvasEl.getBoundingClientRect();
-    const scale = canvasWidth / rect.width;
+    const scaleX = canvasWidth / rect.width;
+    const scaleY = canvasHeight / rect.height;
     isDrawing = true;
-    lastX = (e.clientX - rect.left) * scale;
-    lastY = (e.clientY - rect.top) * scale;
+    lastX = (e.clientX - rect.left) * scaleX;
+    lastY = (e.clientY - rect.top) * scaleY;
   }
 
   function draw(e: MouseEvent) {
     if (!isDrawing || !ctx || !canvasEl) return;
     const rect = canvasEl.getBoundingClientRect();
-    const scale = canvasWidth / rect.width;
-    const x = (e.clientX - rect.left) * scale;
-    const y = (e.clientY - rect.top) * scale;
+    const scaleX = canvasWidth / rect.width;
+    const scaleY = canvasHeight / rect.height;
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
 
     ctx.beginPath();
     ctx.moveTo(lastX, lastY);
@@ -137,16 +139,17 @@
   }
 </script>
 
-<div class="flex-1 overflow-auto bg-[#e5e7eb] dark:bg-[#07090e] p-6 flex items-center justify-center relative select-none">
+<div class="flex-1 overflow-auto bg-[#e5e7eb] dark:bg-[#07090e] p-6 flex relative select-none">
   <!-- Interactive Viewport Wrapper with Dynamic Zoom -->
   <div
-    class="relative shadow-[0_16px_48px_rgba(0,0,0,0.18)] dark:shadow-[0_16px_48px_rgba(0,0,0,0.45)] border border-black/10 dark:border-white/10 rounded-sm transition-transform duration-100 ease-out bg-white"
+    class="m-auto relative shadow-[0_16px_48px_rgba(0,0,0,0.18)] dark:shadow-[0_16px_48px_rgba(0,0,0,0.45)] border border-black/10 dark:border-white/10 rounded-sm transition-transform duration-100 ease-out bg-white"
     style="transform: scale({zoom / 100}); transform-origin: center center;"
   >
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <canvas
       bind:this={canvasEl}
       class="block cursor-crosshair"
+      style="max-width: min({canvasWidth}px, calc(100vw - 64px)); max-height: min({canvasHeight}px, calc(100vh - 150px)); width: auto; height: auto;"
       onmousedown={startDrawing}
       onmousemove={draw}
       onmouseup={stopDrawing}

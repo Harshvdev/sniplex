@@ -7,7 +7,19 @@
   import SettingsModal from './lib/components/SettingsModal.svelte';
   import { Timer } from '@lucide/svelte';
   import { loadShortcuts, matchesShortcut, type ShortcutItem } from './lib/shortcuts';
-  import type { CaptureMode, SnipType, SnipDelay, ToolType, ShapeKind, AppTheme, TabItem, AppView } from './lib/types';
+  import type {
+    CaptureMode,
+    SnipType,
+    SnipDelay,
+    ToolType,
+    ShapeKind,
+    AppTheme,
+    TabItem,
+    AppView,
+    DesktopCapture,
+    CapturePayload,
+  } from './lib/types';
+  import { captureDesktopDisplay, restoreDesktopWindow } from './lib/capture';
 
   // Svelte 5 Runes State
   let theme = $state<AppTheme>(
@@ -135,25 +147,36 @@
     }
   }
 
+  let desktopCapture = $state<DesktopCapture | null>(null);
   let countdown = $state<number | null>(null);
   let countdownTimer: number | null = null;
+
+  async function startCaptureFlow() {
+    try {
+      desktopCapture = await captureDesktopDisplay();
+      isOverlayActive = true;
+    } catch (err) {
+      console.warn('Capture acquisition error:', err);
+      isOverlayActive = true;
+    }
+  }
 
   function handleTriggerNew() {
     if (delay > 0) {
       if (countdownTimer) clearInterval(countdownTimer);
       countdown = delay;
-      countdownTimer = window.setInterval(() => {
+      countdownTimer = window.setInterval(async () => {
         if (countdown !== null && countdown > 1) {
           countdown -= 1;
         } else {
           if (countdownTimer) clearInterval(countdownTimer);
           countdownTimer = null;
           countdown = null;
-          isOverlayActive = true;
+          await startCaptureFlow();
         }
       }, 1000);
     } else {
-      isOverlayActive = true;
+      startCaptureFlow();
     }
   }
 
@@ -163,21 +186,49 @@
     countdown = null;
   }
 
-  function handleCapture(rect: { x: number; y: number; w: number; h: number }) {
+  async function handleCloseOverlay() {
     isOverlayActive = false;
+    desktopCapture = null;
+    await restoreDesktopWindow();
+  }
+
+  async function handleCapture(
+    payload: CapturePayload | { x?: number; y?: number; w?: number; h?: number; imageUrl?: string; width?: number; height?: number }
+  ) {
+    isOverlayActive = false;
+    await restoreDesktopWindow();
     view = 'editor';
     const newId = `tab-${Date.now()}`;
+
+    let imageUrl = '';
+    let width = 960;
+    let height = 540;
+
+    if ('imageUrl' in payload && payload.imageUrl) {
+      imageUrl = payload.imageUrl;
+      width = payload.width || 960;
+      height = payload.height || 540;
+    } else if ('w' in payload && 'h' in payload && payload.w && payload.h) {
+      width = payload.w;
+      height = payload.h;
+      if (desktopCapture?.image_data_url) {
+        imageUrl = desktopCapture.image_data_url;
+      }
+    }
+
     tabs = [
       ...tabs,
       {
         id: newId,
-        title: `Snip ${rect.w}×${rect.h}`,
-        width: rect.w,
-        height: rect.h,
+        title: `Snip ${width}×${height}`,
+        imageUrl,
+        width,
+        height,
         timestamp: 'Just now',
       },
     ];
     activeTabId = newId;
+    desktopCapture = null;
   }
 
   function handleTriggerOcr() {
@@ -222,7 +273,14 @@
     if (fullscreenShortcut && matchesShortcut(e, fullscreenShortcut.keys)) {
       e.preventDefault();
       snipType = 'fullscreen';
-      handleCapture({ x: 0, y: 0, w: window.innerWidth, h: window.innerHeight });
+      captureDesktopDisplay().then((cap) => {
+        handleCapture({
+          imageUrl: cap.image_data_url,
+          width: cap.width,
+          height: cap.height,
+          mode: 'fullscreen',
+        });
+      });
       return;
     }
 
@@ -354,7 +412,8 @@
       {mode}
       {snipType}
       {delay}
-      onClose={() => isOverlayActive = false}
+      {desktopCapture}
+      onClose={handleCloseOverlay}
       onCapture={handleCapture}
       onModeChange={(m) => mode = m}
       onSnipTypeChange={(t) => snipType = t}
