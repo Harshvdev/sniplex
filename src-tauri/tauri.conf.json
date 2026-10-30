@@ -22,6 +22,16 @@
         "fullscreen": false,
         "decorations": false,
         "maximized": true
+      },
+      {
+        "label": "overlay",
+        "title": "Sniplex Capture Overlay",
+        "url": "index.html#overlay",
+        "fullscreen": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "visible": false,
+        "resizable": false
       }
     ],
     "security": {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick, onMount } from 'svelte';
   import TitleBar from './lib/components/TitleBar.svelte';
   import CommandBar from './lib/components/CommandBar.svelte';
   import CanvasArea from './lib/components/CanvasArea.svelte';
@@ -19,7 +20,7 @@
     DesktopCapture,
     CapturePayload,
   } from './lib/types';
-  import { captureDesktopDisplay, restoreDesktopWindow } from './lib/capture';
+  import { captureDesktopDisplay, restoreDesktopWindow, isTauriEnvironment } from './lib/capture';
 
   // Svelte 5 Runes State
   let theme = $state<AppTheme>(
@@ -152,26 +153,128 @@
   let countdown = $state<number | null>(null);
   let countdownTimer: number | null = null;
 
-  async function startCaptureFlow() {
-    try {
-      const res = await captureDesktopDisplay();
-      desktopCapture = res.capture;
-      wasWindowMaximized = res.wasMaximized;
+  // Dedicated overlay instance states
+  const isOverlayInstance = typeof window !== 'undefined' && window.location.hash === '#overlay';
+  let overlayCapture = $state<DesktopCapture | null>(null);
+  let overlayMode = $state<CaptureMode>('snip');
+  let overlaySnipType = $state<SnipType>('rectangle');
+  let overlayDelay = $state<SnipDelay>(0);
+  let isOverlayReady = $state(false);
 
-      // In Full-Screen mode, capture instantly without requiring an extra click
-      if (snipType === 'fullscreen') {
-        await handleCapture({
-          imageUrl: res.capture.image_data_url,
-          width: res.capture.width,
-          height: res.capture.height,
-          mode: 'fullscreen',
+  onMount(async () => {
+    if (isTauriEnvironment()) {
+      if (isOverlayInstance) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const { listen } = await import('@tauri-apps/api/event');
+
+        async function fetchSession() {
+          try {
+            const session = await invoke<{
+              capture: DesktopCapture;
+              mode: CaptureMode;
+              snip_type: SnipType;
+              delay: SnipDelay;
+            } | null>('get_capture_session');
+
+            if (session) {
+              overlayCapture = session.capture;
+              overlayMode = session.mode;
+              overlaySnipType = session.snip_type;
+              overlayDelay = session.delay;
+              isOverlayReady = true;
+
+              await Promise.race([
+                new Promise<void>((resolve) => {
+                  const img = new Image();
+                  img.onload = () => resolve();
+                  img.onerror = () => resolve();
+                  img.src = session.capture.image_data_url;
+                  if (typeof img.decode === 'function') {
+                    img.decode().then(resolve).catch(resolve);
+                  }
+                }),
+                new Promise<void>((resolve) => setTimeout(resolve, 80)),
+              ]);
+
+              await tick();
+
+              // Window DOM is ready: reveal overlay window now
+              await invoke('show_capture_overlay');
+            }
+          } catch (err) {
+            console.warn('Failed to fetch capture session:', err);
+          }
+        }
+
+        await fetchSession();
+
+        listen('session-ready', async () => {
+          await fetchSession();
         });
       } else {
+        // Main editor window: listen for snip completion from overlay window
+        const { listen } = await import('@tauri-apps/api/event');
+        listen<CapturePayload>('snip-captured', (event) => {
+          handleCapture(event.payload);
+        });
+      }
+    }
+  });
+
+  async function handleOverlayCapture(payload: CapturePayload) {
+    isOverlayReady = false;
+    overlayCapture = null;
+    if (isTauriEnvironment()) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('complete_capture', { payload });
+    }
+  }
+
+  async function handleOverlayClose() {
+    isOverlayReady = false;
+    overlayCapture = null;
+    if (isTauriEnvironment()) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('cancel_capture');
+    }
+  }
+
+  async function startCaptureFlow() {
+    try {
+      if (isTauriEnvironment()) {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        await getCurrentWindow().hide();
+
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('start_capture_session', {
+          mode,
+          snipType,
+          delay,
+        });
+      } else {
+        const res = await captureDesktopDisplay();
+        desktopCapture = res.capture;
+        wasWindowMaximized = res.wasMaximized;
+
+        if (snipType === 'fullscreen') {
+          await handleCapture({
+            imageUrl: res.capture.image_data_url,
+            width: res.capture.width,
+            height: res.capture.height,
+            mode: 'fullscreen',
+          });
+          return;
+        }
+
         isOverlayActive = true;
       }
     } catch (err) {
       console.warn('Capture acquisition error:', err);
-      isOverlayActive = true;
+      if (isTauriEnvironment()) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('cancel_capture');
+      }
+      isOverlayActive = false;
     }
   }
 
@@ -203,14 +306,18 @@
   async function handleCloseOverlay() {
     isOverlayActive = false;
     desktopCapture = null;
-    await restoreDesktopWindow(wasWindowMaximized);
+    if (!isTauriEnvironment()) {
+      await restoreDesktopWindow(wasWindowMaximized);
+    }
   }
 
   async function handleCapture(
     payload: CapturePayload | { x?: number; y?: number; w?: number; h?: number; imageUrl?: string; width?: number; height?: number }
   ) {
     isOverlayActive = false;
-    await restoreDesktopWindow(wasWindowMaximized);
+    if (!isTauriEnvironment()) {
+      await restoreDesktopWindow(wasWindowMaximized);
+    }
     view = 'editor';
     const newId = `tab-${Date.now()}`;
 
@@ -331,132 +438,155 @@
 
 <svelte:window onkeydown={handleGlobalKeyDown} />
 
-<!-- Outer application shell with dynamic light/dark class -->
-<div class="{theme} h-screen w-screen flex flex-col font-segoe select-none overflow-hidden transition-colors duration-150">
-  <div class="h-full w-full flex flex-col bg-[#f3f4f6] dark:bg-[#0d0f14] text-neutral-800 dark:text-neutral-100">
-    <!-- 1. Window TitleBar with Draggable Region & Window Controls -->
-    <TitleBar
-      {tabs}
-      {activeTabId}
-      {theme}
-      onSelectTab={(id) => { activeTabId = id; view = 'editor'; }}
-      onCloseTab={handleCloseTab}
-      onNewTab={handleNewTab}
+{#if isOverlayInstance}
+  <!-- Dedicated Fullscreen Capture Overlay Window -->
+  <div class="h-screen w-screen bg-transparent overflow-hidden select-none">
+    <FloatingOverlay
+      active={isOverlayReady}
+      mode={overlayMode}
+      snipType={overlaySnipType}
+      delay={overlayDelay}
+      desktopCapture={overlayCapture}
+      onClose={handleOverlayClose}
+      onCapture={handleOverlayCapture}
+      onModeChange={(m) => (overlayMode = m)}
+      onSnipTypeChange={(t) => (overlaySnipType = t)}
+      onDelayChange={(d) => (overlayDelay = d)}
+      onScreenDraw={() => {}}
+      onTextActions={() => {}}
+      onColorPicker={() => {}}
     />
-
-    <!-- 2. CommandBar Toolbar -->
-    <CommandBar
-      {mode}
-      {snipType}
-      {delay}
-      {activeTool}
-      {penColor}
-      {penSize}
-      {highlighterColor}
-      {highlighterSize}
-      {shapeKind}
-      {zoom}
-      hasImage={view === 'editor' && tabs.length > 0}
-      {isCropping}
-      onTriggerNew={handleTriggerNew}
-      onTriggerOcr={handleTriggerOcr}
-      onModeChange={(m) => mode = m}
-      onSnipTypeChange={(t) => snipType = t}
-      onDelayChange={(d) => delay = d}
-      onToolChange={(t) => activeTool = t}
-      onPenColorChange={(c) => penColor = c}
-      onPenSizeChange={(s) => penSize = s}
-      onHighlighterColorChange={(c) => highlighterColor = c}
-      onHighlighterSizeChange={(s) => highlighterSize = s}
-      onShapeKindChange={(s) => shapeKind = s}
-      onZoomChange={(z) => zoom = z}
-      onSave={handleSave}
-      onCopy={handleCopy}
-      onOpenSettings={() => view = 'settings'}
-      onOpenFile={handleOpenFile}
-      onPrint={handlePrint}
-      onToggleCrop={() => isCropping = !isCropping}
-      onClearAll={() => {
-        const canvas = document.querySelector('canvas');
-        if (canvas) {
-          const ctx = canvas.getContext('2d');
-          if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
-        }
-      }}
-    />
-
-    <!-- 3. Main Body View (Canvas, Empty, or Settings) -->
-    {#if view === 'settings'}
-      <SettingsModal
+  </div>
+{:else}
+  <!-- Outer application shell with dynamic light/dark class -->
+  <div class="{theme} h-screen w-screen flex flex-col font-segoe select-none overflow-hidden transition-colors duration-150">
+    <div class="h-full w-full flex flex-col bg-[#f3f4f6] dark:bg-[#0d0f14] text-neutral-800 dark:text-neutral-100">
+      <!-- 1. Window TitleBar with Draggable Region & Window Controls -->
+      <TitleBar
+        {tabs}
+        {activeTabId}
         {theme}
-        onClose={() => view = tabs.length > 0 ? 'editor' : 'empty'}
-        onThemeChange={(t) => theme = t}
-        onShortcutsChange={(s) => shortcuts = s}
+        onSelectTab={(id) => { activeTabId = id; view = 'editor'; }}
+        onCloseTab={handleCloseTab}
+        onNewTab={handleNewTab}
       />
-    {:else if view === 'empty' || tabs.length === 0}
-      <EmptyState />
-    {:else}
-      <CanvasArea
-        imageUrl={activeTab?.imageUrl || ''}
-        width={activeTab?.width || 960}
-        height={activeTab?.height || 540}
-        {zoom}
+
+      <!-- 2. CommandBar Toolbar -->
+      <CommandBar
+        {mode}
+        {snipType}
+        {delay}
         {activeTool}
         {penColor}
         {penSize}
         {highlighterColor}
         {highlighterSize}
+        {shapeKind}
+        {zoom}
+        hasImage={view === 'editor' && tabs.length > 0}
         {isCropping}
-        onApplyCrop={() => isCropping = false}
-        onCancelCrop={() => isCropping = false}
+        onTriggerNew={handleTriggerNew}
+        onTriggerOcr={handleTriggerOcr}
+        onModeChange={(m) => mode = m}
+        onSnipTypeChange={(t) => snipType = t}
+        onDelayChange={(d) => delay = d}
+        onToolChange={(t) => activeTool = t}
+        onPenColorChange={(c) => penColor = c}
+        onPenSizeChange={(s) => penSize = s}
+        onHighlighterColorChange={(c) => highlighterColor = c}
+        onHighlighterSizeChange={(s) => highlighterSize = s}
+        onShapeKindChange={(s) => shapeKind = s}
+        onZoomChange={(z) => zoom = z}
+        onSave={handleSave}
+        onCopy={handleCopy}
+        onOpenSettings={() => view = 'settings'}
+        onOpenFile={handleOpenFile}
+        onPrint={handlePrint}
+        onToggleCrop={() => isCropping = !isCropping}
+        onClearAll={() => {
+          const canvas = document.querySelector('canvas');
+          if (canvas) {
+            const ctx = canvas.getContext('2d');
+            if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+          }
+        }}
       />
-    {/if}
 
-    <!-- Hidden file input for opening local images -->
-    <input
-      bind:this={fileInputEl}
-      type="file"
-      accept="image/*"
-      class="hidden"
-      onchange={handleFileSelect}
-    />
+      <!-- 3. Main Body View (Canvas, Empty, or Settings) -->
+      {#if view === 'settings'}
+        <SettingsModal
+          {theme}
+          onClose={() => view = tabs.length > 0 ? 'editor' : 'empty'}
+          onThemeChange={(t) => theme = t}
+          onShortcutsChange={(s) => shortcuts = s}
+        />
+      {:else if view === 'empty' || tabs.length === 0}
+        <EmptyState />
+      {:else}
+        <CanvasArea
+          imageUrl={activeTab?.imageUrl || ''}
+          width={activeTab?.width || 960}
+          height={activeTab?.height || 540}
+          {zoom}
+          {activeTool}
+          {penColor}
+          {penSize}
+          {highlighterColor}
+          {highlighterSize}
+          {isCropping}
+          onApplyCrop={() => isCropping = false}
+          onCancelCrop={() => isCropping = false}
+        />
+      {/if}
 
-    <!-- 4. Floating Capture Overlay Bar -->
-    <FloatingOverlay
-      active={isOverlayActive}
-      {mode}
-      {snipType}
-      {delay}
-      {desktopCapture}
-      onClose={handleCloseOverlay}
-      onCapture={handleCapture}
-      onModeChange={(m) => mode = m}
-      onSnipTypeChange={(t) => snipType = t}
-      onDelayChange={(d) => delay = d}
-      onScreenDraw={() => {
-        activeTool = 'pen';
-      }}
-      onTextActions={() => {
-        activeTool = 'text';
-      }}
-      onColorPicker={(color) => {
-        if (color) penColor = color;
-      }}
-    />
+      <!-- Hidden file input for opening local images -->
+      <input
+        bind:this={fileInputEl}
+        type="file"
+        accept="image/*"
+        class="hidden"
+        onchange={handleFileSelect}
+      />
 
-    <!-- Active Timer Countdown Toast -->
-    {#if countdown !== null}
-      <div class="fixed top-8 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2.5 px-4 py-2 bg-white/95 dark:bg-[#181d28]/95 border border-black/10 dark:border-white/10 rounded-full shadow-[0_8px_32px_rgba(0,0,0,0.3)] backdrop-blur-md text-xs font-medium text-neutral-800 dark:text-neutral-100 select-none animate-in fade-in zoom-in-95 duration-150">
-        <Timer class="w-4 h-4 text-[#0067c0] dark:text-[#60cdff] animate-pulse" />
-        <span>Snip in <strong class="font-bold font-mono text-[13px]">{countdown}</strong>s...</span>
-        <button
-          type="button"
-          class="ml-1 text-[11px] px-2 py-0.5 rounded-full hover:bg-black/5 dark:hover:bg-white/10 text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200 transition-colors cursor-pointer"
-          onclick={handleCancelCountdown}
-        >
-          Cancel
-        </button>
-      </div>
-    {/if}
+      <!-- Non-Tauri fallback FloatingOverlay -->
+      {#if !isTauriEnvironment() && isOverlayActive}
+        <FloatingOverlay
+          active={isOverlayActive}
+          {mode}
+          {snipType}
+          {delay}
+          {desktopCapture}
+          onClose={handleCloseOverlay}
+          onCapture={handleCapture}
+          onModeChange={(m) => (mode = m)}
+          onSnipTypeChange={(t) => (snipType = t)}
+          onDelayChange={(d) => (delay = d)}
+          onScreenDraw={() => {
+            activeTool = 'pen';
+          }}
+          onTextActions={() => {
+            activeTool = 'text';
+          }}
+          onColorPicker={(color) => {
+            if (color) penColor = color;
+          }}
+        />
+      {/if}
+
+      <!-- Active Timer Countdown Toast -->
+      {#if countdown !== null}
+        <div class="fixed top-8 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2.5 px-4 py-2 bg-white/95 dark:bg-[#181d28]/95 border border-black/10 dark:border-white/10 rounded-full shadow-[0_8px_32px_rgba(0,0,0,0.3)] backdrop-blur-md text-xs font-medium text-neutral-800 dark:text-neutral-100 select-none animate-in fade-in zoom-in-95 duration-150">
+          <Timer class="w-4 h-4 text-[#0067c0] dark:text-[#60cdff] animate-pulse" />
+          <span>Snip in <strong class="font-bold font-mono text-[13px]">{countdown}</strong>s...</span>
+          <button
+            type="button"
+            class="ml-1 text-[11px] px-2 py-0.5 rounded-full hover:bg-black/5 dark:hover:bg-white/10 text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-200 transition-colors cursor-pointer"
+            onclick={handleCancelCountdown}
+          >
+            Cancel
+          </button>
+        </div>
+      {/if}
+    </div>
   </div>
-</div>
+{/if}

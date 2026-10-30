@@ -39,10 +39,15 @@
 
   async function handleClose() {
     try {
-      const { getCurrentWindow } = await import('@tauri-apps/api/window');
-      await getCurrentWindow().close();
-    } catch (e) {
-      window.close();
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('exit_app');
+    } catch {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        await getCurrentWindow().close();
+      } catch (e) {
+        window.close();
+      }
     }
   }
 </script>

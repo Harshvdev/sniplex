@@ -2,6 +2,7 @@ use base64::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::process::Command;
+use tauri::{Emitter, Manager};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct WindowRect {
@@ -21,14 +22,35 @@ pub struct DesktopCapture {
     pub windows: Vec<WindowRect>,
 }
 
-pub fn parse_png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CaptureSession {
+    pub capture: DesktopCapture,
+    pub mode: String,
+    pub snip_type: String,
+    pub delay: u32,
+}
+
+#[derive(Default)]
+pub struct AppCaptureState {
+    pub session: std::sync::Mutex<Option<CaptureSession>>,
+}
+
+pub fn parse_image_dimensions(bytes: &[u8]) -> Option<(u32, u32, &'static str)> {
     if bytes.len() >= 24 && &bytes[0..8] == b"\x89PNG\r\n\x1a\n" {
         let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
         let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
-        Some((width, height))
+        Some((width, height, "image/png"))
+    } else if bytes.len() >= 26 && &bytes[0..2] == b"BM" {
+        let width = u32::from_le_bytes([bytes[18], bytes[19], bytes[20], bytes[21]]);
+        let height = u32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]);
+        Some((width, height, "image/bmp"))
     } else {
         None
     }
+}
+
+pub fn parse_png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    parse_image_dimensions(bytes).map(|(w, h, _)| (w, h))
 }
 
 pub fn parse_kdotool_geometry(output: &str) -> Option<(i32, i32, u32, u32)> {
@@ -157,6 +179,9 @@ pub fn detect_desktop_windows(scale_factor: f64) -> Vec<WindowRect> {
 }
 
 fn execute_screen_grab(output_path: &str) -> bool {
+    let is_bmp = output_path.ends_with(".bmp");
+    let desktop_env = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_uppercase();
+
     // 1. Try spectacle background capture (KDE Plasma)
     if let Ok(status) = Command::new("spectacle")
         .args(["-b", "-n", "-o", output_path])
@@ -171,9 +196,9 @@ fn execute_screen_grab(output_path: &str) -> bool {
         }
     }
 
-    // 2. Try gnome-screenshot (GNOME on Wayland or X11)
-    if let Ok(status) = Command::new("gnome-screenshot")
-        .args(["-f", output_path])
+    // Fallback: try spectacle with explicit fullscreen flag
+    if let Ok(status) = Command::new("spectacle")
+        .args(["-b", "-n", "-f", "-o", output_path])
         .status()
     {
         if status.success() {
@@ -185,11 +210,40 @@ fn execute_screen_grab(output_path: &str) -> bool {
         }
     }
 
+    // If BMP was requested and spectacle failed, switch to PNG path for standard tools
+    let target_path = if is_bmp {
+        output_path.replace(".bmp", ".png")
+    } else {
+        output_path.to_string()
+    };
+
+    // 2. Try gnome-screenshot (GNOME on Wayland or X11; skip on KDE to avoid X11 assertion bugs)
+    if !desktop_env.contains("KDE") {
+        if let Ok(status) = Command::new("gnome-screenshot")
+            .args(["-f", &target_path])
+            .status()
+        {
+            if status.success() {
+                if let Ok(meta) = fs::metadata(&target_path) {
+                    if meta.len() > 0 {
+                        if is_bmp {
+                            let _ = fs::rename(&target_path, output_path);
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
     // 3. Try grim (wlroots-based Wayland compositors: Sway, Hyprland, Wayfire)
-    if let Ok(status) = Command::new("grim").arg(output_path).status() {
+    if let Ok(status) = Command::new("grim").arg(&target_path).status() {
         if status.success() {
-            if let Ok(meta) = fs::metadata(output_path) {
+            if let Ok(meta) = fs::metadata(&target_path) {
                 if meta.len() > 0 {
+                    if is_bmp {
+                        let _ = fs::rename(&target_path, output_path);
+                    }
                     return true;
                 }
             }
@@ -197,10 +251,13 @@ fn execute_screen_grab(output_path: &str) -> bool {
     }
 
     // 4. Try maim (X11)
-    if let Ok(status) = Command::new("maim").arg(output_path).status() {
+    if let Ok(status) = Command::new("maim").arg(&target_path).status() {
         if status.success() {
-            if let Ok(meta) = fs::metadata(output_path) {
+            if let Ok(meta) = fs::metadata(&target_path) {
                 if meta.len() > 0 {
+                    if is_bmp {
+                        let _ = fs::rename(&target_path, output_path);
+                    }
                     return true;
                 }
             }
@@ -208,10 +265,13 @@ fn execute_screen_grab(output_path: &str) -> bool {
     }
 
     // 5. Try scrot (X11)
-    if let Ok(status) = Command::new("scrot").arg(output_path).status() {
+    if let Ok(status) = Command::new("scrot").arg(&target_path).status() {
         if status.success() {
-            if let Ok(meta) = fs::metadata(output_path) {
+            if let Ok(meta) = fs::metadata(&target_path) {
                 if meta.len() > 0 {
+                    if is_bmp {
+                        let _ = fs::rename(&target_path, output_path);
+                    }
                     return true;
                 }
             }
@@ -220,12 +280,15 @@ fn execute_screen_grab(output_path: &str) -> bool {
 
     // 6. Try ImageMagick import (X11)
     if let Ok(status) = Command::new("import")
-        .args(["-window", "root", output_path])
+        .args(["-window", "root", &target_path])
         .status()
     {
         if status.success() {
-            if let Ok(meta) = fs::metadata(output_path) {
+            if let Ok(meta) = fs::metadata(&target_path) {
                 if meta.len() > 0 {
+                    if is_bmp {
+                        let _ = fs::rename(&target_path, output_path);
+                    }
                     return true;
                 }
             }
@@ -236,40 +299,162 @@ fn execute_screen_grab(output_path: &str) -> bool {
 }
 
 #[tauri::command]
-fn capture_desktop(window: tauri::Window) -> Result<DesktopCapture, String> {
-    // 1. Immediately hide window so Sniplex vanishes completely before capturing
-    let _ = window.hide();
-    // Allow display compositor time to unmap window and clear animations
-    std::thread::sleep(std::time::Duration::from_millis(280));
+fn start_capture_session(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppCaptureState>,
+    mode: String,
+    snip_type: String,
+    delay: u32,
+) -> Result<(), String> {
+    // 1. Immediately hide main editor window cleanly
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.hide();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(25));
 
-    // 2. Prepare temp path
+    // 2. Prepare fast in-memory RAM disk temp path (/dev/shm)
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let temp_path = std::env::temp_dir().join(format!("sniplex_freeze_{}.png", timestamp));
+    let shm_dir = std::path::Path::new("/dev/shm");
+    let base_dir = if shm_dir.exists() && shm_dir.is_dir() {
+        shm_dir
+    } else {
+        std::path::Path::new("/tmp")
+    };
+    let temp_path = base_dir.join(format!("sniplex_freeze_{}.bmp", timestamp));
     let temp_path_str = temp_path.to_string_lossy().to_string();
 
-    let captured = execute_screen_grab(&temp_path_str);
+    let scale_factor = if let Some(main) = app.get_webview_window("main") {
+        main.scale_factor().unwrap_or(1.0)
+    } else {
+        1.0
+    };
+
+    // Run screen grab and window detection in parallel across separate threads
+    let thread_path = temp_path_str.to_string();
+    let screen_thread = std::thread::spawn(move || execute_screen_grab(&thread_path));
+    let win_thread = std::thread::spawn(move || detect_desktop_windows(scale_factor));
+
+    let captured = screen_thread.join().unwrap_or(false);
+    let windows = win_thread.join().unwrap_or_default();
 
     if !captured {
-        let _ = window.show();
-        let _ = window.set_focus();
+        if let Some(main) = app.get_webview_window("main") {
+            let _ = main.show();
+            let _ = main.set_focus();
+        }
         return Err("Unable to capture screen using available desktop capture backends".to_string());
     }
 
     let bytes = fs::read(&temp_path).map_err(|e| format!("Failed to read captured buffer: {}", e))?;
     let _ = fs::remove_file(&temp_path);
 
-    let (width, height) = parse_png_dimensions(&bytes).unwrap_or((1920, 1080));
-    let scale_factor = window.scale_factor().unwrap_or(1.0);
-    let windows = detect_desktop_windows(scale_factor);
-    let image_data_url = format!("data:image/png;base64,{}", BASE64_STANDARD.encode(&bytes));
+    let (width, height, mime) = parse_image_dimensions(&bytes).unwrap_or((1920, 1080, "image/png"));
+    let image_data_url = format!("data:{};base64,{}", mime, BASE64_STANDARD.encode(&bytes));
 
-    // 3. Map window directly to fullscreen capture overlay
-    let _ = window.set_fullscreen(true);
-    let _ = window.show();
-    let _ = window.set_focus();
+    let capture = DesktopCapture {
+        image_data_url: image_data_url.clone(),
+        width,
+        height,
+        windows,
+    };
+
+    // In Full-Screen mode, resolve instantly directly back into main window
+    if snip_type == "fullscreen" {
+        let payload = serde_json::json!({
+            "imageUrl": image_data_url,
+            "width": width,
+            "height": height,
+            "mode": "fullscreen"
+        });
+        if let Some(main) = app.get_webview_window("main") {
+            let _ = main.show();
+            let _ = main.set_focus();
+            let _ = main.emit("snip-captured", &payload);
+        }
+        return Ok(());
+    }
+
+    let session = CaptureSession {
+        capture,
+        mode,
+        snip_type,
+        delay,
+    };
+
+    if let Ok(mut lock) = state.session.lock() {
+        *lock = Some(session.clone());
+    }
+
+    // Notify overlay window that session data is ready;
+    // the overlay window will decode the image bitmap and invoke show_capture_overlay
+    if let Some(overlay) = app.get_webview_window("overlay") {
+        let _ = overlay.emit("session-ready", &session);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn get_capture_session(state: tauri::State<'_, AppCaptureState>) -> Result<Option<CaptureSession>, String> {
+    if let Ok(lock) = state.session.lock() {
+        Ok(lock.clone())
+    } else {
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+fn capture_desktop(app: tauri::AppHandle) -> Result<DesktopCapture, String> {
+    // 1. Immediately hide main editor window cleanly
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.hide();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(25));
+
+    // 2. Prepare fast in-memory RAM disk temp path (/dev/shm)
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let shm_dir = std::path::Path::new("/dev/shm");
+    let base_dir = if shm_dir.exists() && shm_dir.is_dir() {
+        shm_dir
+    } else {
+        std::path::Path::new("/tmp")
+    };
+    let temp_path = base_dir.join(format!("sniplex_freeze_{}.bmp", timestamp));
+    let temp_path_str = temp_path.to_string_lossy().to_string();
+
+    let scale_factor = if let Some(main) = app.get_webview_window("main") {
+        main.scale_factor().unwrap_or(1.0)
+    } else {
+        1.0
+    };
+
+    // Run screen grab and window detection in parallel across separate threads
+    let thread_path = temp_path_str.to_string();
+    let screen_thread = std::thread::spawn(move || execute_screen_grab(&thread_path));
+    let win_thread = std::thread::spawn(move || detect_desktop_windows(scale_factor));
+
+    let captured = screen_thread.join().unwrap_or(false);
+    let windows = win_thread.join().unwrap_or_default();
+
+    if !captured {
+        if let Some(main) = app.get_webview_window("main") {
+            let _ = main.show();
+            let _ = main.set_focus();
+        }
+        return Err("Unable to capture screen using available desktop capture backends".to_string());
+    }
+
+    let bytes = fs::read(&temp_path).map_err(|e| format!("Failed to read captured buffer: {}", e))?;
+    let _ = fs::remove_file(&temp_path);
+
+    let (width, height, mime) = parse_image_dimensions(&bytes).unwrap_or((1920, 1080, "image/png"));
+    let image_data_url = format!("data:{};base64,{}", mime, BASE64_STANDARD.encode(&bytes));
 
     Ok(DesktopCapture {
         image_data_url,
@@ -277,6 +462,40 @@ fn capture_desktop(window: tauri::Window) -> Result<DesktopCapture, String> {
         height,
         windows,
     })
+}
+
+#[tauri::command]
+fn show_capture_overlay(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(overlay) = app.get_webview_window("overlay") {
+        let _ = overlay.show();
+        let _ = overlay.set_focus();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn complete_capture(app: tauri::AppHandle, payload: serde_json::Value) -> Result<(), String> {
+    if let Some(overlay) = app.get_webview_window("overlay") {
+        let _ = overlay.hide();
+    }
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.set_focus();
+        let _ = main.emit("snip-captured", payload);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn cancel_capture(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(overlay) = app.get_webview_window("overlay") {
+        let _ = overlay.hide();
+    }
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.set_focus();
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -328,16 +547,35 @@ fn select_folder() -> Result<Option<String>, String> {
     Ok(None)
 }
 
+#[tauri::command]
+fn exit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             select_folder,
             capture_desktop,
+            start_capture_session,
+            get_capture_session,
+            show_capture_overlay,
+            complete_capture,
+            cancel_capture,
             restore_window,
-            get_detected_windows
+            get_detected_windows,
+            exit_app
         ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                if window.label() == "main" {
+                    window.app_handle().exit(0);
+                }
+            }
+        })
         .setup(|app| {
+            app.manage(AppCaptureState::default());
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -354,6 +592,17 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_image_dimensions_bmp() {
+        let mut header = vec![b'B', b'M'];
+        header.extend_from_slice(&[0; 16]); // padding up to byte 18
+        header.extend_from_slice(&1920u32.to_le_bytes()); // width at bytes 18..22
+        header.extend_from_slice(&1080u32.to_le_bytes()); // height at bytes 22..26
+
+        let dims = parse_image_dimensions(&header);
+        assert_eq!(dims, Some((1920, 1080, "image/bmp")));
+    }
 
     #[test]
     fn test_parse_png_dimensions_valid() {
