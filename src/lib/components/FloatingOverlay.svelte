@@ -32,6 +32,7 @@
     mode = 'snip',
     snipType = 'rectangle',
     delay = 0,
+    frameUrl = '',
     desktopCapture = null,
     onClose = () => {},
     onCapture = () => {},
@@ -46,6 +47,7 @@
     mode: CaptureMode;
     snipType: SnipType;
     delay?: SnipDelay;
+    frameUrl?: string;
     desktopCapture?: DesktopCapture | null;
     onClose: () => void;
     onCapture: (payload: CapturePayload) => void;
@@ -84,19 +86,10 @@
 
   // Image element for frozen display buffer
   let frozenImgEl = $state<HTMLImageElement | null>(null);
-  let preloadedImg = $state<HTMLImageElement | null>(null);
 
-  $effect(() => {
-    if (desktopCapture?.image_data_url) {
-      const img = new Image();
-      img.onload = () => {
-        preloadedImg = img;
-      };
-      img.src = desktopCapture.image_data_url;
-    } else {
-      preloadedImg = null;
-    }
-  });
+  // Single source of truth for the frozen frame: a blob URL on the capture
+  // overlay window, or the inline data URL used by the browser fallback.
+  const frameSrc = $derived(frameUrl || desktopCapture?.image_data_url || '');
 
   // Drag-to-snip interaction state
   let isDragging = $state(false);
@@ -186,8 +179,23 @@
   }
 
   function executeFullscreenCapture() {
+    // Re-encode the frozen frame so the editor window can display it as a tab
+    let imageUrl = '';
+    const sourceImg = frozenImgEl;
+    if (sourceImg && sourceImg.complete && sourceImg.naturalWidth > 0) {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = sourceImg.naturalWidth;
+        canvas.height = sourceImg.naturalHeight;
+        canvas.getContext('2d')?.drawImage(sourceImg, 0, 0);
+        imageUrl = canvas.toDataURL('image/png');
+      } catch (err) {
+        console.error('Failed to export full screen frame:', err);
+      }
+    }
+
     onCapture({
-      imageUrl: desktopCapture?.image_data_url || '',
+      imageUrl,
       width: desktopCapture?.width || window.innerWidth,
       height: desktopCapture?.height || window.innerHeight,
       mode: 'fullscreen',
@@ -196,7 +204,7 @@
 
   async function executeWindowCapture(win: WindowRect) {
     let cropped = '';
-    const sourceImg = preloadedImg || frozenImgEl;
+    const sourceImg = frozenImgEl;
     if (sourceImg && sourceImg.complete && sourceImg.naturalWidth > 0) {
       try {
         cropped = cropRectangle(sourceImg, {
@@ -210,8 +218,8 @@
       }
     }
 
-    if (!cropped && desktopCapture?.image_data_url) {
-      cropped = await cropFromDataUrl(desktopCapture.image_data_url, {
+    if (!cropped && frameSrc) {
+      cropped = await cropFromDataUrl(frameSrc, {
         x: win.x,
         y: win.y,
         w: win.width,
@@ -220,7 +228,7 @@
     }
 
     onCapture({
-      imageUrl: cropped || (desktopCapture?.image_data_url ?? ''),
+      imageUrl: cropped || frameSrc,
       width: win.width,
       height: win.height,
       mode: 'window',
@@ -322,7 +330,7 @@
         };
 
         let cropped = '';
-        const sourceImg = preloadedImg || frozenImgEl;
+        const sourceImg = frozenImgEl;
         if (sourceImg && sourceImg.complete && sourceImg.naturalWidth > 0) {
           try {
             cropped = cropRectangle(sourceImg, scaledRect);
@@ -331,12 +339,12 @@
           }
         }
 
-        if (!cropped && desktopCapture?.image_data_url) {
-          cropped = await cropFromDataUrl(desktopCapture.image_data_url, scaledRect);
+        if (!cropped && frameSrc) {
+          cropped = await cropFromDataUrl(frameSrc, scaledRect);
         }
 
         onCapture({
-          imageUrl: cropped || (desktopCapture?.image_data_url ?? ''),
+          imageUrl: cropped || frameSrc,
           width: Math.round(scaledRect.w),
           height: Math.round(scaledRect.h),
           mode: 'rectangle',
@@ -355,7 +363,7 @@
         }));
 
         let cropResult = { dataUrl: '', width: 0, height: 0 };
-        const sourceImg = preloadedImg || frozenImgEl;
+        const sourceImg = frozenImgEl;
         if (sourceImg && sourceImg.complete && sourceImg.naturalWidth > 0) {
           try {
             cropResult = cropFreeform(sourceImg, scaledPoints);
@@ -364,9 +372,9 @@
           }
         }
 
-        if (!cropResult.dataUrl && desktopCapture?.image_data_url) {
+        if (!cropResult.dataUrl && frameSrc) {
           cropResult = await cropFreeformFromDataUrl(
-            desktopCapture.image_data_url,
+            frameSrc,
             scaledPoints
           );
         }
@@ -458,10 +466,10 @@
     onmouseup={handleMouseUp}
   >
     <!-- Frozen display screenshot layer -->
-    {#if desktopCapture?.image_data_url}
+    {#if frameSrc}
       <img
         bind:this={frozenImgEl}
-        src={desktopCapture.image_data_url}
+        src={frameSrc}
         alt=""
         class="absolute inset-0 w-full h-full object-fill pointer-events-none select-none"
       />

@@ -19,8 +19,10 @@
     AppView,
     DesktopCapture,
     CapturePayload,
+    WindowRect,
   } from './lib/types';
   import { captureDesktopDisplay, restoreDesktopWindow, isTauriEnvironment } from './lib/capture';
+  import { initTiming, mark } from './lib/timing';
 
   // Svelte 5 Runes State
   let theme = $state<AppTheme>(
@@ -156,62 +158,114 @@
   // Dedicated overlay instance states
   const isOverlayInstance = typeof window !== 'undefined' && window.location.hash === '#overlay';
   let overlayCapture = $state<DesktopCapture | null>(null);
+  let overlayFrameUrl = $state('');
   let overlayMode = $state<CaptureMode>('snip');
   let overlaySnipType = $state<SnipType>('rectangle');
   let overlayDelay = $state<SnipDelay>(0);
   let isOverlayReady = $state(false);
 
+  function releaseOverlayFrame() {
+    if (overlayFrameUrl) {
+      URL.revokeObjectURL(overlayFrameUrl);
+      overlayFrameUrl = '';
+    }
+  }
+
   onMount(async () => {
     if (isTauriEnvironment()) {
       if (isOverlayInstance) {
+        await initTiming();
         const { invoke } = await import('@tauri-apps/api/core');
         const { listen } = await import('@tauri-apps/api/event');
 
+        let pendingWindows: WindowRect[] | null = null;
+
         async function fetchSession() {
           try {
+            mark('overlay.fetch_start');
             const session = await invoke<{
               capture: DesktopCapture;
               mode: CaptureMode;
               snip_type: SnipType;
               delay: SnipDelay;
             } | null>('get_capture_session');
+            mark('overlay.session_meta');
 
             if (session) {
+              // Pull the frozen frame as raw bytes and hand it to the img element
+              // through a same-origin blob URL (no base64, no JSON marshalling).
+              const frame = await invoke<ArrayBuffer>('get_capture_frame');
+              mark('overlay.frame_bytes');
+              const frameUrl = URL.createObjectURL(new Blob([frame], { type: 'image/bmp' }));
+              const previousFrameUrl = overlayFrameUrl;
+
               overlayCapture = session.capture;
               overlayMode = session.mode;
               overlaySnipType = session.snip_type;
               overlayDelay = session.delay;
+              overlayFrameUrl = frameUrl;
+
+              if (pendingWindows) {
+                overlayCapture = { ...overlayCapture, windows: pendingWindows };
+                pendingWindows = null;
+              }
+
               isOverlayReady = true;
 
-              await Promise.race([
+              // Start the decode and the window reveal concurrently: showing the
+              // overlay first overlaps its surface map/first paint with the decode,
+              // and the dimmed live desktop looks identical to the frozen frame.
+              mark('overlay.decode_start');
+              const decoded = Promise.race([
                 new Promise<void>((resolve) => {
                   const img = new Image();
                   img.onload = () => resolve();
                   img.onerror = () => resolve();
-                  img.src = session.capture.image_data_url;
+                  img.src = frameUrl;
                   if (typeof img.decode === 'function') {
                     img.decode().then(resolve).catch(resolve);
                   }
                 }),
-                new Promise<void>((resolve) => setTimeout(resolve, 80)),
+                new Promise<void>((resolve) => setTimeout(resolve, 250)),
               ]);
 
               await tick();
+              mark('overlay.tick');
 
               // Window DOM is ready: reveal overlay window now
-              await invoke('show_capture_overlay');
+              mark('overlay.show_call');
+              const shown = invoke('show_capture_overlay');
+
+              await decoded;
+              mark('overlay.frame_decoded');
+
+              if (previousFrameUrl) URL.revokeObjectURL(previousFrameUrl);
+
+              await shown;
+              mark('overlay.show_returned');
+              requestAnimationFrame(() => mark('overlay.first_raf'));
             }
           } catch (err) {
             console.warn('Failed to fetch capture session:', err);
           }
         }
 
-        await fetchSession();
-
-        listen('session-ready', async () => {
-          await fetchSession();
+        // Attach listeners before the first read so no session event is missed
+        listen<WindowRect[]>('windows-ready', (event) => {
+          if (overlayCapture) {
+            overlayCapture = { ...overlayCapture, windows: event.payload };
+          } else {
+            pendingWindows = event.payload;
+          }
         });
+
+        listen('session-ready', () => {
+          void fetchSession();
+        });
+
+        await fetchSession();
       } else {
+        await initTiming();
         // Main editor window: listen for snip completion from overlay window
         const { listen } = await import('@tauri-apps/api/event');
         listen<CapturePayload>('snip-captured', (event) => {
@@ -224,6 +278,7 @@
   async function handleOverlayCapture(payload: CapturePayload) {
     isOverlayReady = false;
     overlayCapture = null;
+    releaseOverlayFrame();
     if (isTauriEnvironment()) {
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('complete_capture', { payload });
@@ -233,6 +288,7 @@
   async function handleOverlayClose() {
     isOverlayReady = false;
     overlayCapture = null;
+    releaseOverlayFrame();
     if (isTauriEnvironment()) {
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('cancel_capture');
@@ -242,8 +298,10 @@
   async function startCaptureFlow() {
     try {
       if (isTauriEnvironment()) {
+        mark('main.hide_call');
         const { getCurrentWindow } = await import('@tauri-apps/api/window');
         await getCurrentWindow().hide();
+        mark('main.hidden');
 
         const { invoke } = await import('@tauri-apps/api/core');
         await invoke('start_capture_session', {
@@ -251,6 +309,7 @@
           snipType,
           delay,
         });
+        mark('main.command_done');
       } else {
         const res = await captureDesktopDisplay();
         desktopCapture = res.capture;
@@ -446,6 +505,7 @@
       mode={overlayMode}
       snipType={overlaySnipType}
       delay={overlayDelay}
+      frameUrl={overlayFrameUrl}
       desktopCapture={overlayCapture}
       onClose={handleOverlayClose}
       onCapture={handleOverlayCapture}
