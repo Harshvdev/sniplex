@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Sniplex
+Comment=Modern desktop screen capture and markup utility
+Exec=/usr/bin/sniplex
+Icon=sniplex
+Terminal=false
+Categories=Graphics;Utility;
+Keywords=screenshot;capture;snip;annotate;
+StartupNotify=true
+X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2

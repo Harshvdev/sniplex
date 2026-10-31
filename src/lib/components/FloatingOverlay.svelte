@@ -32,7 +32,7 @@
     mode = 'snip',
     snipType = 'rectangle',
     delay = 0,
-    frameUrl = '',
+    frameBitmap = null,
     desktopCapture = null,
     onClose = () => {},
     onCapture = () => {},
@@ -47,7 +47,7 @@
     mode: CaptureMode;
     snipType: SnipType;
     delay?: SnipDelay;
-    frameUrl?: string;
+    frameBitmap?: ImageBitmap | null;
     desktopCapture?: DesktopCapture | null;
     onClose: () => void;
     onCapture: (payload: CapturePayload) => void;
@@ -84,12 +84,48 @@
     }
   });
 
-  // Image element for frozen display buffer
-  let frozenImgEl = $state<HTMLImageElement | null>(null);
+  // Canvas holding the frozen frame, at native pixel dimensions.
+  let frozenCanvasEl = $state<HTMLCanvasElement | null>(null);
 
-  // Single source of truth for the frozen frame: a blob URL on the capture
-  // overlay window, or the inline data URL used by the browser fallback.
-  const frameSrc = $derived(frameUrl || desktopCapture?.image_data_url || '');
+  // Inline data URL used only by the browser preview fallback; the desktop
+  // overlay always arrives as a decoded bitmap.
+  const frameSrc = $derived(desktopCapture?.image_data_url || '');
+
+  // Paints whatever frame is available into the canvas once, so every crop
+  // reads from one place regardless of how the frame arrived.
+  $effect(() => {
+    const canvas = frozenCanvasEl;
+    const bitmap = frameBitmap;
+    const source = frameSrc;
+    if (!canvas) return;
+
+    const context = canvas.getContext('2d');
+    if (!context) return;
+
+    if (bitmap) {
+      if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+      }
+      context.drawImage(bitmap, 0, 0);
+      return;
+    }
+
+    if (!source) return;
+    let cancelled = false;
+    const image = new Image();
+    image.onload = () => {
+      if (cancelled) return;
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      canvas.getContext('2d')?.drawImage(image, 0, 0);
+    };
+    image.src = source;
+
+    return () => {
+      cancelled = true;
+    };
+  });
 
   // Drag-to-snip interaction state
   let isDragging = $state(false);
@@ -181,14 +217,10 @@
   function executeFullscreenCapture() {
     // Re-encode the frozen frame so the editor window can display it as a tab
     let imageUrl = '';
-    const sourceImg = frozenImgEl;
-    if (sourceImg && sourceImg.complete && sourceImg.naturalWidth > 0) {
+    const sourceCanvas = frozenCanvasEl;
+    if (sourceCanvas && sourceCanvas.width > 0) {
       try {
-        const canvas = document.createElement('canvas');
-        canvas.width = sourceImg.naturalWidth;
-        canvas.height = sourceImg.naturalHeight;
-        canvas.getContext('2d')?.drawImage(sourceImg, 0, 0);
-        imageUrl = canvas.toDataURL('image/png');
+        imageUrl = sourceCanvas.toDataURL('image/png');
       } catch (err) {
         console.error('Failed to export full screen frame:', err);
       }
@@ -204,8 +236,8 @@
 
   async function executeWindowCapture(win: WindowRect) {
     let cropped = '';
-    const sourceImg = frozenImgEl;
-    if (sourceImg && sourceImg.complete && sourceImg.naturalWidth > 0) {
+    const sourceImg = frozenCanvasEl;
+    if (sourceImg && sourceImg.width > 0) {
       try {
         cropped = cropRectangle(sourceImg, {
           x: win.x,
@@ -330,8 +362,8 @@
         };
 
         let cropped = '';
-        const sourceImg = frozenImgEl;
-        if (sourceImg && sourceImg.complete && sourceImg.naturalWidth > 0) {
+        const sourceImg = frozenCanvasEl;
+        if (sourceImg && sourceImg.width > 0) {
           try {
             cropped = cropRectangle(sourceImg, scaledRect);
           } catch (err) {
@@ -363,8 +395,8 @@
         }));
 
         let cropResult = { dataUrl: '', width: 0, height: 0 };
-        const sourceImg = frozenImgEl;
-        if (sourceImg && sourceImg.complete && sourceImg.naturalWidth > 0) {
+        const sourceImg = frozenCanvasEl;
+        if (sourceImg && sourceImg.width > 0) {
           try {
             cropResult = cropFreeform(sourceImg, scaledPoints);
           } catch (err) {
@@ -466,13 +498,11 @@
     onmouseup={handleMouseUp}
   >
     <!-- Frozen display screenshot layer -->
-    {#if frameSrc}
-      <img
-        bind:this={frozenImgEl}
-        src={frameSrc}
-        alt=""
-        class="absolute inset-0 w-full h-full object-fill pointer-events-none select-none"
-      />
+    {#if frameSrc || frameBitmap}
+      <canvas
+        bind:this={frozenCanvasEl}
+        class="absolute inset-0 w-full h-full pointer-events-none select-none"
+      ></canvas>
     {/if}
 
     <!-- SVG Mask with live shape cutouts -->

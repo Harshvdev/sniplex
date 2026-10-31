@@ -6,6 +6,8 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use tauri::{Emitter, Manager};
 
+mod capture_kwin;
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct WindowRect {
     pub id: String,
@@ -36,6 +38,7 @@ pub struct CaptureSession {
 pub struct AppCaptureState {
     pub session: std::sync::Mutex<Option<CaptureSession>>,
     pub frame_path: std::sync::Mutex<Option<std::path::PathBuf>>,
+    pub frame_raw: std::sync::Mutex<Option<capture_kwin::RawFrame>>,
 }
 
 /// Fast in-memory RAM disk, falling back to the system temp directory.
@@ -382,6 +385,39 @@ fn prewarm_capture_backend() {
     }
 }
 
+/// True when the compositor can hand us pixels directly. Falls back to the
+/// external capture tool when the session is not KDE, when the compositor
+/// refused us before, or when SNIPLEX_CAPTURE=tool is set.
+fn should_try_native_capture() -> bool {
+    match std::env::var("SNIPLEX_CAPTURE").ok().as_deref() {
+        Some("native") => return true,
+        Some("tool") => return false,
+        _ => {}
+    }
+    if capture_kwin::is_disabled() {
+        return false;
+    }
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .to_uppercase();
+    desktop.contains("KDE")
+}
+
+/// Publishes the frozen frame for the overlay to pull over IPC.
+fn publish_frame(state: &AppCaptureState, raw: Option<capture_kwin::RawFrame>, path: &str) {
+    let has_raw = raw.is_some();
+    if let Ok(mut slot) = state.frame_raw.lock() {
+        *slot = raw;
+    }
+    if let Ok(mut slot) = state.frame_path.lock() {
+        *slot = if has_raw {
+            None
+        } else {
+            Some(std::path::PathBuf::from(path))
+        };
+    }
+}
+
 /// Performs the blocking parts of a capture session off the UI thread.
 fn run_capture_session(
     app: tauri::AppHandle,
@@ -389,25 +425,49 @@ fn run_capture_session(
     snip_type: String,
     delay: u32,
 ) -> Result<(), String> {
-    // The capture backend needs ~200ms of startup before it actually grabs the
-    // screen, which is well past the compositor's window-hide animation, so the
-    // grab can be launched immediately instead of waiting for the editor to go.
     timing_log("capture_start");
     prune_capture_files();
 
-    let frame_path = unique_capture_path("frame", "bmp");
+    let frame_path = unique_capture_path("frame", "png");
     let scale_factor = app
         .get_webview_window("main")
         .and_then(|main| main.scale_factor().ok())
         .unwrap_or(1.0);
 
-    // Freeze the display right away; window geometry is collected in parallel and
-    // only needed for highlight frames, so it must not delay the overlay reveal.
-    let screen_path = frame_path.clone();
-    let screen_thread = std::thread::spawn(move || execute_screen_grab(&screen_path));
+    // Window geometry is collected in parallel and only needed for highlight
+    // frames, so it must not delay the overlay reveal.
     let win_thread = std::thread::spawn(move || detect_desktop_windows(scale_factor));
 
-    let captured = screen_thread.join().unwrap_or(false);
+    // Prefer the compositor: it returns raw pixels with no external process and
+    // no image encoding at all.
+    let mut native_frame = None;
+    if should_try_native_capture() {
+        // The compositor drops the editor window before the request is even
+        // answered, so no settle delay is needed; the knob stays for setups
+        // that turn out to need one.
+        let settle = std::env::var("SNIPLEX_SETTLE_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        if settle > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(settle));
+        }
+        timing_log("native_start");
+        if let Ok(frame) = capture_kwin::capture_workspace() {
+            native_frame = Some(frame);
+        }
+        timing_log("native_done");
+    }
+
+    let captured = match native_frame {
+        Some(_) => true,
+        None => {
+            timing_log("tool_start");
+            let result = execute_screen_grab(&frame_path);
+            timing_log("tool_done");
+            result
+        }
+    };
     timing_log("grab_done");
 
     if !captured {
@@ -419,17 +479,23 @@ fn run_capture_session(
         return Err("Unable to capture screen using available desktop capture backends".to_string());
     }
 
-    let (width, height) = read_capture_dimensions(&frame_path)
-        .map(|(width, height, _)| (width, height))
-        .unwrap_or((1920, 1080));
+    let (width, height) = match &native_frame {
+        Some(frame) => (frame.width, frame.height),
+        None => read_capture_dimensions(&frame_path)
+            .map(|(width, height, _)| (width, height))
+            .unwrap_or((1920, 1080)),
+    };
 
-    // In Full-Screen mode, resolve instantly directly back into main window
+    let state = app.state::<AppCaptureState>();
+    publish_frame(&state, native_frame, &frame_path);
+
+    // In Full-Screen mode, resolve instantly directly back into main window.
+    // The frame is handed over without an image payload; the editor window pulls
+    // it and re-encodes it once.
     if snip_type == "fullscreen" {
         let _ = win_thread.join();
-        let bytes = fs::read(&frame_path).map_err(|e| format!("Failed to read captured buffer: {}", e))?;
-        let _ = fs::remove_file(&frame_path);
         let payload = serde_json::json!({
-            "imageUrl": format!("data:image/png;base64,{}", BASE64_STANDARD.encode(&bytes)),
+            "imageUrl": "",
             "width": width,
             "height": height,
             "mode": "fullscreen"
@@ -440,13 +506,6 @@ fn run_capture_session(
             let _ = main.emit("snip-captured", &payload);
         }
         return Ok(());
-    }
-
-    let state = app.state::<AppCaptureState>();
-
-    // Publish the frame location before notifying the overlay, so its fetch never races.
-    if let Ok(mut frame) = state.frame_path.lock() {
-        *frame = Some(std::path::PathBuf::from(&frame_path));
     }
 
     if let Ok(mut lock) = state.session.lock() {
@@ -510,6 +569,21 @@ async fn start_capture_session(
 fn get_capture_frame(
     state: tauri::State<'_, AppCaptureState>,
 ) -> Result<tauri::ipc::Response, String> {
+    // Raw compositor frames travel as: magic "SLXR", width, height, then RGBA.
+    let raw = state
+        .frame_raw
+        .lock()
+        .ok()
+        .and_then(|frame| frame.as_ref().map(|f| (f.width, f.height, f.data.clone())));
+    if let Some((width, height, data)) = raw {
+        let mut payload = Vec::with_capacity(12 + data.len());
+        payload.extend_from_slice(b"SLXR");
+        payload.extend_from_slice(&width.to_le_bytes());
+        payload.extend_from_slice(&height.to_le_bytes());
+        payload.extend_from_slice(&data);
+        return Ok(tauri::ipc::Response::new(payload));
+    }
+
     let path = state
         .frame_path
         .lock()
@@ -525,6 +599,9 @@ fn clear_capture_state(app: &tauri::AppHandle) {
     let state = app.state::<AppCaptureState>();
     if let Ok(mut lock) = state.session.lock() {
         *lock = None;
+    }
+    if let Ok(mut slot) = state.frame_raw.lock() {
+        *slot = None;
     }
     let frame = state.frame_path.lock().ok().and_then(|mut frame| frame.take());
     if let Some(path) = frame {

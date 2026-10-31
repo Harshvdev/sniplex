@@ -158,16 +158,16 @@
   // Dedicated overlay instance states
   const isOverlayInstance = typeof window !== 'undefined' && window.location.hash === '#overlay';
   let overlayCapture = $state<DesktopCapture | null>(null);
-  let overlayFrameUrl = $state('');
+  let overlayFrameBitmap = $state<ImageBitmap | null>(null);
   let overlayMode = $state<CaptureMode>('snip');
   let overlaySnipType = $state<SnipType>('rectangle');
   let overlayDelay = $state<SnipDelay>(0);
   let isOverlayReady = $state(false);
 
   function releaseOverlayFrame() {
-    if (overlayFrameUrl) {
-      URL.revokeObjectURL(overlayFrameUrl);
-      overlayFrameUrl = '';
+    if (overlayFrameBitmap) {
+      overlayFrameBitmap.close();
+      overlayFrameBitmap = null;
     }
   }
 
@@ -192,18 +192,34 @@
             mark('overlay.session_meta');
 
             if (session) {
-              // Pull the frozen frame as raw bytes and hand it to the img element
-              // through a same-origin blob URL (no base64, no JSON marshalling).
+              // The compositor hands over raw RGBA pixels; the external fallback
+              // hands over an encoded file. Both become a bitmap/canvas source.
               const frame = await invoke<ArrayBuffer>('get_capture_frame');
               mark('overlay.frame_bytes');
-              const frameUrl = URL.createObjectURL(new Blob([frame], { type: 'image/bmp' }));
-              const previousFrameUrl = overlayFrameUrl;
+
+              const header = new Uint8Array(frame, 0, Math.min(4, frame.byteLength));
+              const isRawFrame =
+                header[0] === 0x53 && header[1] === 0x4c && header[2] === 0x58 && header[3] === 0x52;
+
+              let frameBitmap: ImageBitmap;
+              if (isRawFrame) {
+                const meta = new DataView(frame, 4, 8);
+                const width = meta.getUint32(0, true);
+                const height = meta.getUint32(4, true);
+                const pixels = new Uint8ClampedArray(frame, 12, width * height * 4);
+                frameBitmap = await createImageBitmap(new ImageData(pixels, width, height));
+              } else {
+                frameBitmap = await createImageBitmap(new Blob([frame], { type: 'image/png' }));
+              }
+
+              mark('overlay.frame_decoded');
+              releaseOverlayFrame();
 
               overlayCapture = session.capture;
               overlayMode = session.mode;
               overlaySnipType = session.snip_type;
               overlayDelay = session.delay;
-              overlayFrameUrl = frameUrl;
+              overlayFrameBitmap = frameBitmap;
 
               if (pendingWindows) {
                 overlayCapture = { ...overlayCapture, windows: pendingWindows };
@@ -212,34 +228,12 @@
 
               isOverlayReady = true;
 
-              // Start the decode and the window reveal concurrently: showing the
-              // overlay first overlaps its surface map/first paint with the decode,
-              // and the dimmed live desktop looks identical to the frozen frame.
-              mark('overlay.decode_start');
-              const decoded = Promise.race([
-                new Promise<void>((resolve) => {
-                  const img = new Image();
-                  img.onload = () => resolve();
-                  img.onerror = () => resolve();
-                  img.src = frameUrl;
-                  if (typeof img.decode === 'function') {
-                    img.decode().then(resolve).catch(resolve);
-                  }
-                }),
-                new Promise<void>((resolve) => setTimeout(resolve, 250)),
-              ]);
-
               await tick();
               mark('overlay.tick');
 
               // Window DOM is ready: reveal overlay window now
               mark('overlay.show_call');
               const shown = invoke('show_capture_overlay');
-
-              await decoded;
-              mark('overlay.frame_decoded');
-
-              if (previousFrameUrl) URL.revokeObjectURL(previousFrameUrl);
 
               await shown;
               mark('overlay.show_returned');
@@ -370,6 +364,52 @@
     }
   }
 
+  /** Pulls the frozen frame and re-encodes it for the editor window. */
+  async function frameToDataUrl(): Promise<{ imageUrl: string; width: number; height: number } | null> {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const frame = await invoke<ArrayBuffer>('get_capture_frame');
+      const header = new Uint8Array(frame, 0, Math.min(4, frame.byteLength));
+      const isRawFrame =
+        header[0] === 0x53 && header[1] === 0x4c && header[2] === 0x58 && header[3] === 0x52;
+
+      let source: CanvasImageSource;
+      let width: number;
+      let height: number;
+      let release: (() => void) | null = null;
+
+      if (isRawFrame) {
+        const meta = new DataView(frame, 4, 8);
+        width = meta.getUint32(0, true);
+        height = meta.getUint32(4, true);
+        const bitmap = await createImageBitmap(
+          new ImageData(new Uint8ClampedArray(frame, 12, width * height * 4), width, height)
+        );
+        source = bitmap;
+        release = () => bitmap.close();
+      } else {
+        const bitmap = await createImageBitmap(new Blob([frame], { type: 'image/png' }));
+        width = bitmap.width;
+        height = bitmap.height;
+        source = bitmap;
+        release = () => bitmap.close();
+      }
+
+      if (!width || !height) return null;
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      canvas.getContext('2d')?.drawImage(source, 0, 0);
+      release?.();
+
+      return { imageUrl: canvas.toDataURL('image/png'), width, height };
+    } catch (err) {
+      console.warn('Failed to read the frozen frame:', err);
+      return null;
+    }
+  }
+
   async function handleCapture(
     payload: CapturePayload | { x?: number; y?: number; w?: number; h?: number; imageUrl?: string; width?: number; height?: number }
   ) {
@@ -384,8 +424,20 @@
     let width = 960;
     let height = 540;
 
-    if ('imageUrl' in payload && payload.imageUrl) {
-      imageUrl = payload.imageUrl;
+    const payloadUrl = 'imageUrl' in payload ? payload.imageUrl : '';
+    const isInstantFullscreen = 'mode' in payload && payload.mode === 'fullscreen';
+
+    if (!payloadUrl && isInstantFullscreen && isTauriEnvironment()) {
+      // The backend handed the frame over unpainted so no image encoding sits on
+      // the capture path; encode it here, once.
+      const frame = await frameToDataUrl();
+      if (frame) {
+        imageUrl = frame.imageUrl;
+        width = frame.width;
+        height = frame.height;
+      }
+    } else if (payloadUrl) {
+      imageUrl = payloadUrl;
       width = payload.width || 960;
       height = payload.height || 540;
     } else if ('w' in payload && 'h' in payload && payload.w && payload.h) {
@@ -505,7 +557,7 @@
       mode={overlayMode}
       snipType={overlaySnipType}
       delay={overlayDelay}
-      frameUrl={overlayFrameUrl}
+      frameBitmap={overlayFrameBitmap}
       desktopCapture={overlayCapture}
       onClose={handleOverlayClose}
       onCapture={handleOverlayCapture}
