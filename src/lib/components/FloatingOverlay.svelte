@@ -29,6 +29,7 @@
 
   let {
     active = false,
+    visible = true,
     mode = 'snip',
     snipType = 'rectangle',
     delay = 0,
@@ -44,6 +45,12 @@
     onColorPicker = () => {},
   }: {
     active: boolean;
+    /**
+     * Kept mounted but transparent until the capture surface has its final
+     * size, so the first composite is paid for off-screen instead of showing a
+     * shrunken frame in the corner.
+     */
+    visible?: boolean;
     mode: CaptureMode;
     snipType: SnipType;
     delay?: SnipDelay;
@@ -492,6 +499,7 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="fixed inset-0 z-50 select-none cursor-crosshair overflow-hidden"
+    class:opacity-0={!visible}
     style="cursor: crosshair !important;"
     onmousedown={handleMouseDown}
     onmousemove={handleMouseMove}

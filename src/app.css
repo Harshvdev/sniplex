@@ -28,6 +28,15 @@
     color-scheme: dark;
   }
 
+  /* Capture overlay window: the window's own translucent backdrop is the only
+     thing on screen until the frozen frame is ready, so the page must not paint
+     over it. */
+  html.overlay-surface,
+  html.overlay-surface body {
+    background-color: transparent;
+    color-scheme: dark;
+  }
+
   /* Prevent browser default blue outline on buttons */
   button:focus,
   button:focus-visible {

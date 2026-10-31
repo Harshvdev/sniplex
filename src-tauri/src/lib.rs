@@ -802,9 +802,13 @@ pub fn run() {
         .setup(|app| {
             app.manage(AppCaptureState::default());
             prune_capture_files();
-            // Warm the capture backend's interpreter/runtime cache in the
-            // background so the first snip does not pay for a cold start.
-            std::thread::spawn(prewarm_capture_backend);
+            // Warm the external capture tool's interpreter/runtime cache so
+            // the first fallback snip does not pay for a cold start. The
+            // compositor path needs no helper, and spawning one would only
+            // contend for disk and CPU while the app is starting.
+            if !should_try_native_capture() {
+                std::thread::spawn(prewarm_capture_backend);
+            }
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()

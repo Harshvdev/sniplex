@@ -163,6 +163,10 @@
   let overlaySnipType = $state<SnipType>('rectangle');
   let overlayDelay = $state<SnipDelay>(0);
   let isOverlayReady = $state(false);
+  // WebKitGTK lays the webview out at its 800x600 default the first time the
+  // overlay window is mapped, then resizes it. Content stays hidden until that
+  // settles so the frozen frame never appears shrunken in the corner.
+  let overlaySized = $state(false);
 
   function releaseOverlayFrame() {
     if (overlayFrameBitmap) {
@@ -172,6 +176,13 @@
   }
 
   onMount(async () => {
+    // The capture overlay is a full-screen capture surface, so it is always
+    // dark; this also keeps the brief first-map layout pass from flashing the
+    // theme background across the screen.
+    if (isOverlayInstance) {
+      document.documentElement.classList.add('overlay-surface');
+    }
+
     if (isTauriEnvironment()) {
       if (isOverlayInstance) {
         await initTiming();
@@ -179,6 +190,22 @@
         const { listen } = await import('@tauri-apps/api/event');
 
         let pendingWindows: WindowRect[] | null = null;
+
+        function waitForOverlayLayout(): Promise<void> {
+          return new Promise((resolve) => {
+            const deadline = Date.now() + 200;
+            const check = () => {
+              const laidOut =
+                (window.innerWidth !== 800 || window.innerHeight !== 600) && window.innerWidth > 0;
+              if (laidOut || Date.now() >= deadline) {
+                resolve();
+                return;
+              }
+              requestAnimationFrame(check);
+            };
+            check();
+          });
+        }
 
         async function fetchSession() {
           try {
@@ -192,9 +219,18 @@
             mark('overlay.session_meta');
 
             if (session) {
+              // The window's translucent backdrop covers the desktop the moment
+              // it maps, so the screen is dimmed while the frame is still being
+              // transferred. The request goes out first so the transfer runs
+              // while the webview is mapping instead of after it.
+              //
               // The compositor hands over raw RGBA pixels; the external fallback
               // hands over an encoded file. Both become a bitmap/canvas source.
-              const frame = await invoke<ArrayBuffer>('get_capture_frame');
+              const frameRequest = invoke<ArrayBuffer>('get_capture_frame');
+              mark('overlay.show_call');
+              const shown = invoke('show_capture_overlay');
+
+              const frame = await frameRequest;
               mark('overlay.frame_bytes');
 
               const header = new Uint8Array(frame, 0, Math.min(4, frame.byteLength));
@@ -228,12 +264,12 @@
 
               isOverlayReady = true;
 
+              await waitForOverlayLayout();
+              mark('overlay.sized');
+              overlaySized = true;
+
               await tick();
               mark('overlay.tick');
-
-              // Window DOM is ready: reveal overlay window now
-              mark('overlay.show_call');
-              const shown = invoke('show_capture_overlay');
 
               await shown;
               mark('overlay.show_returned');
@@ -554,6 +590,7 @@
   <div class="h-screen w-screen bg-transparent overflow-hidden select-none">
     <FloatingOverlay
       active={isOverlayReady}
+      visible={overlaySized}
       mode={overlayMode}
       snipType={overlaySnipType}
       delay={overlayDelay}
