@@ -71,13 +71,15 @@
   let currentDelay = $state<SnipDelay>(0);
   let isSnipMenuOpen = $state(false);
   let isDelayMenuOpen = $state(false);
+  let isCloseHovered = $state(false);
 
   $effect(() => {
     currentMode = mode;
     currentSnipType = snipType;
     currentDelay = delay;
 
-    if (!active) {
+    if (!active || !visible) {
+      isCloseHovered = false;
       isDragging = false;
       isDraggingPill = false;
       freeformPoints = [];
@@ -488,6 +490,7 @@
         isSnipMenuOpen = false;
         isDelayMenuOpen = false;
       } else if (active) {
+        isCloseHovered = false;
         onClose();
       }
     }
@@ -624,7 +627,7 @@
         <!-- Camera Button (Snip Mode) -->
         <button
           type="button"
-          class="relative h-full px-2.5 rounded-[4px] flex items-center justify-center transition-all cursor-pointer {currentMode === 'snip' ? 'bg-white dark:bg-[#252c3d] text-neutral-900 dark:text-white shadow-sm' : 'text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white'}"
+          class="relative h-full px-2.5 rounded-[4px] flex items-center justify-center transition-colors cursor-pointer {currentMode === 'snip' ? 'bg-white dark:bg-[#252c3d] text-neutral-900 dark:text-white shadow-sm' : 'text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white'}"
           onclick={() => { currentMode = 'snip'; onModeChange('snip'); }}
           title="Snip mode"
         >
@@ -637,7 +640,7 @@
         <!-- Video Button (Record Mode) -->
         <button
           type="button"
-          class="relative h-full px-2.5 rounded-[4px] flex items-center justify-center transition-all cursor-pointer {currentMode === 'record' ? 'bg-white dark:bg-[#252c3d] text-neutral-900 dark:text-white shadow-sm' : 'text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white'}"
+          class="relative h-full px-2.5 rounded-[4px] flex items-center justify-center transition-colors cursor-pointer {currentMode === 'record' ? 'bg-white dark:bg-[#252c3d] text-neutral-900 dark:text-white shadow-sm' : 'text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white'}"
           onclick={() => { currentMode = 'record'; onModeChange('record'); }}
           title="Record mode"
         >
@@ -764,8 +767,27 @@
       <!-- 7. Close Button -->
       <button
         type="button"
-        class="w-8 h-8 rounded-[6px] flex items-center justify-center text-neutral-600 dark:text-neutral-300 hover:bg-[#c42b1c] hover:text-white transition-colors cursor-pointer"
-        onclick={onClose}
+        class="w-8 h-8 rounded-[6px] flex items-center justify-center cursor-pointer {isCloseHovered ? 'bg-[#c42b1c] text-white' : 'text-neutral-600 dark:text-neutral-300'}"
+        onmouseenter={(e) => {
+          if (!active || !visible) return;
+          const rect = (e.currentTarget as HTMLElement)?.getBoundingClientRect();
+          if (
+            rect &&
+            e.clientX >= rect.left &&
+            e.clientX <= rect.right &&
+            e.clientY >= rect.top &&
+            e.clientY <= rect.bottom
+          ) {
+            isCloseHovered = true;
+          }
+        }}
+        onmouseleave={() => { isCloseHovered = false; }}
+        onmousedown={() => { isCloseHovered = false; }}
+        onclick={(e) => {
+          (e.currentTarget as HTMLElement)?.blur();
+          isCloseHovered = false;
+          onClose();
+        }}
         title="Cancel snip (Esc)"
       >
         <X class="w-4 h-4 stroke-[1.8]" />

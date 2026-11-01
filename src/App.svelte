@@ -219,6 +219,8 @@
             mark('overlay.session_meta');
 
             if (session) {
+              isOverlayReady = false;
+              overlaySized = false;
               // The window's translucent backdrop covers the desktop the moment
               // it maps, so the screen is dimmed while the frame is still being
               // transferred. The request goes out first so the transfer runs
@@ -307,8 +309,15 @@
 
   async function handleOverlayCapture(payload: CapturePayload) {
     isOverlayReady = false;
+    overlaySized = false;
     overlayCapture = null;
     releaseOverlayFrame();
+    await tick();
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => resolve());
+      });
+    });
     if (isTauriEnvironment()) {
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('complete_capture', { payload });
@@ -317,8 +326,15 @@
 
   async function handleOverlayClose() {
     isOverlayReady = false;
+    overlaySized = false;
     overlayCapture = null;
     releaseOverlayFrame();
+    await tick();
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => resolve());
+      });
+    });
     if (isTauriEnvironment()) {
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('cancel_capture');

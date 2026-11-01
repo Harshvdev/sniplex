@@ -148,7 +148,7 @@
     <!-- 1. "+ New" Button -->
     <button
       type="button"
-      class="h-8 flex items-center justify-center gap-1.5 px-3 bg-[#0067c0] hover:bg-[#1070c7] text-white text-xs font-medium rounded-[6px] shadow-sm transition-all transform active:scale-95"
+      class="h-8 flex items-center justify-center gap-1.5 px-3 bg-[#0067c0] hover:bg-[#1070c7] active:bg-[#005fb8] text-white text-xs font-medium rounded-[6px] shadow-sm transition-colors"
       onclick={onTriggerNew}
       title="New snip (Print Screen or Ctrl+N)"
     >
@@ -160,7 +160,7 @@
     <div class="flex items-center h-8 bg-black/[0.04] dark:bg-white/[0.06] rounded-[6px] p-0.5 border border-black/[0.05] dark:border-white/[0.05]">
       <button
         type="button"
-        class="relative h-full flex items-center justify-center px-2.5 rounded-[4px] text-xs font-medium transition-all {mode === 'snip' ? 'bg-white dark:bg-[#222a3b] text-neutral-900 dark:text-white shadow-sm' : 'text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white'}"
+        class="relative h-full flex items-center justify-center px-2.5 rounded-[4px] text-xs font-medium transition-colors {mode === 'snip' ? 'bg-white dark:bg-[#222a3b] text-neutral-900 dark:text-white shadow-sm' : 'text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white'}"
         onclick={() => onModeChange('snip')}
         title="Snip mode"
       >
@@ -172,7 +172,7 @@
 
       <button
         type="button"
-        class="relative h-full flex items-center justify-center px-2.5 rounded-[4px] text-xs font-medium transition-all {mode === 'record' ? 'bg-white dark:bg-[#222a3b] text-neutral-900 dark:text-white shadow-sm' : 'text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white'}"
+        class="relative h-full flex items-center justify-center px-2.5 rounded-[4px] text-xs font-medium transition-colors {mode === 'record' ? 'bg-white dark:bg-[#222a3b] text-neutral-900 dark:text-white shadow-sm' : 'text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white'}"
         onclick={() => onModeChange('record')}
         title="Record mode"
       >
