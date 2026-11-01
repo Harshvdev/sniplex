@@ -23,6 +23,7 @@
   } from './lib/types';
   import { captureDesktopDisplay, restoreDesktopWindow, isTauriEnvironment } from './lib/capture';
   import { initTiming, mark } from './lib/timing';
+  import { playTimerChime } from './lib/audio';
 
   // Svelte 5 Runes State
   let theme = $state<AppTheme>(
@@ -54,7 +55,17 @@
 
   let mode = $state<CaptureMode>('snip');
   let snipType = $state<SnipType>('rectangle');
-  let delay = $state<SnipDelay>(0);
+  const savedDelay =
+    typeof localStorage !== 'undefined'
+      ? (Number(localStorage.getItem('sniplex_delay')) as SnipDelay)
+      : 0;
+  let delay = $state<SnipDelay>([0, 3, 5, 10].includes(savedDelay) ? savedDelay : 0);
+
+  $effect(() => {
+    try {
+      localStorage.setItem('sniplex_delay', String(delay));
+    } catch {}
+  });
 
   let activeTool = $state<ToolType>('pen');
   let penColor = $state('#0078d4');
@@ -298,11 +309,27 @@
         await fetchSession();
       } else {
         await initTiming();
-        // Main editor window: listen for snip completion from overlay window
+        // Main editor window: listen for snip completion and delay synchronization from overlay window
         const { listen } = await import('@tauri-apps/api/event');
         listen<CapturePayload>('snip-captured', (event) => {
           handleCapture(event.payload);
         });
+        listen<{ delay: SnipDelay }>('snip-delay-changed', (event) => {
+          if (event.payload && typeof event.payload.delay === 'number') {
+            delay = event.payload.delay;
+          }
+        });
+
+        if (typeof window !== 'undefined') {
+          window.addEventListener('storage', (e) => {
+            if (e.key === 'sniplex_delay' && e.newValue !== null) {
+              const val = Number(e.newValue) as SnipDelay;
+              if ([0, 3, 5, 10].includes(val)) {
+                delay = val;
+              }
+            }
+          });
+        }
       }
     }
   });
@@ -324,6 +351,17 @@
     }
   }
 
+  async function handleOverlayDelayChange(d: SnipDelay) {
+    overlayDelay = d;
+    try {
+      localStorage.setItem('sniplex_delay', String(d));
+    } catch {}
+    if (isTauriEnvironment()) {
+      const { emit } = await import('@tauri-apps/api/event');
+      await emit('snip-delay-changed', { delay: d });
+    }
+  }
+
   async function handleOverlayClose() {
     isOverlayReady = false;
     overlaySized = false;
@@ -336,6 +374,8 @@
       });
     });
     if (isTauriEnvironment()) {
+      const { emit } = await import('@tauri-apps/api/event');
+      await emit('snip-delay-changed', { delay: overlayDelay });
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('cancel_capture');
     }
@@ -387,9 +427,11 @@
     if (delay > 0) {
       if (countdownTimer) clearInterval(countdownTimer);
       countdown = delay;
+      playTimerChime(countdown === 1 ? 'high' : 'normal');
       countdownTimer = window.setInterval(async () => {
         if (countdown !== null && countdown > 1) {
           countdown -= 1;
+          playTimerChime(countdown === 1 ? 'high' : 'normal');
         } else {
           if (countdownTimer) clearInterval(countdownTimer);
           countdownTimer = null;
@@ -500,6 +542,10 @@
       }
     }
 
+    if ('delay' in payload && typeof payload.delay === 'number') {
+      delay = payload.delay as SnipDelay;
+    }
+
     tabs = [
       ...tabs,
       {
@@ -521,6 +567,12 @@
   }
 
   function handleGlobalKeyDown(e: KeyboardEvent) {
+    if (countdown !== null && e.key === 'Escape') {
+      e.preventDefault();
+      handleCancelCountdown();
+      return;
+    }
+
     if (view === 'settings') return;
 
     const activeEl = document.activeElement;
@@ -616,7 +668,7 @@
       onCapture={handleOverlayCapture}
       onModeChange={(m) => (overlayMode = m)}
       onSnipTypeChange={(t) => (overlaySnipType = t)}
-      onDelayChange={(d) => (overlayDelay = d)}
+      onDelayChange={handleOverlayDelayChange}
       onScreenDraw={() => {}}
       onTextActions={() => {}}
       onColorPicker={() => {}}

@@ -207,9 +207,9 @@
 
   const delayOptions: { id: SnipDelay; label: string }[] = [
     { id: 0, label: 'No delay' },
-    { id: 3, label: 'Snip in 3 seconds' },
-    { id: 5, label: 'Snip in 5 seconds' },
-    { id: 10, label: 'Snip in 10 seconds' },
+    { id: 3, label: '3-second delay' },
+    { id: 5, label: '5-second delay' },
+    { id: 10, label: '10-second delay' },
   ];
 
   function handleWindowPointerDown(e: PointerEvent) {
@@ -240,6 +240,7 @@
       width: desktopCapture?.width || window.innerWidth,
       height: desktopCapture?.height || window.innerHeight,
       mode: 'fullscreen',
+      delay: currentDelay,
     });
   }
 
@@ -273,6 +274,7 @@
       width: win.width,
       height: win.height,
       mode: 'window',
+      delay: currentDelay,
     });
   }
 
@@ -389,6 +391,7 @@
           width: Math.round(scaledRect.w),
           height: Math.round(scaledRect.h),
           mode: 'rectangle',
+          delay: currentDelay,
         });
       }
     } else if (currentSnipType === 'freeform') {
@@ -426,6 +429,7 @@
             width: cropResult.width,
             height: cropResult.height,
             mode: 'freeform',
+            delay: currentDelay,
           });
         }
       }
@@ -694,7 +698,7 @@
           type="button"
           class="h-8 px-2 rounded-[6px] hover:bg-black/[0.05] dark:hover:bg-white/[0.06] flex items-center justify-center gap-1 text-neutral-800 dark:text-neutral-100 transition-colors cursor-pointer"
           onclick={() => { isDelayMenuOpen = !isDelayMenuOpen; isSnipMenuOpen = false; }}
-          title={currentDelay === 0 ? 'Snip delay (No delay)' : `Snip delay (${currentDelay}s)`}
+          title={currentDelay === 0 ? 'Snip delay (No delay)' : `Snip delay (${currentDelay}-second delay)`}
         >
           {#if currentDelay === 0}
             <TimerOff class="w-4 h-4 text-neutral-700 dark:text-neutral-200 stroke-[1.8]" />

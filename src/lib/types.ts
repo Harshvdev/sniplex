@@ -52,6 +52,7 @@ export interface CapturePayload {
   width: number;
   height: number;
   mode: SnipType;
+  delay?: SnipDelay;
 }
 
 export type { ShortcutItem } from './shortcuts';

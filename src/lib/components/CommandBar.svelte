@@ -125,9 +125,9 @@
 
   const delayOptions: { id: SnipDelay; label: string }[] = [
     { id: 0, label: 'No delay' },
-    { id: 3, label: 'Snip in 3 seconds' },
-    { id: 5, label: 'Snip in 5 seconds' },
-    { id: 10, label: 'Snip in 10 seconds' },
+    { id: 3, label: '3-second delay' },
+    { id: 5, label: '5-second delay' },
+    { id: 10, label: '10-second delay' },
   ];
 
   const snipTypes: { id: SnipType; label: string }[] = [
@@ -222,7 +222,7 @@
         type="button"
         class="h-8 flex items-center gap-1 px-2 rounded-[6px] hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-transparent hover:border-black/[0.05] dark:hover:border-white/[0.05] transition-colors text-xs text-neutral-700 dark:text-neutral-300"
         onclick={() => toggleFlyout('delay')}
-        title={delay === 0 ? 'Snip delay (No delay)' : `Snip delay (${delay} seconds)`}
+        title={delay === 0 ? 'Snip delay (No delay)' : `Snip delay (${delay}-second delay)`}
       >
         {#if delay === 0}
           <TimerOff class="w-4 h-4 text-neutral-700 dark:text-neutral-300 stroke-[1.8]" />
