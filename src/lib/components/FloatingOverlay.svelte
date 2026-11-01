@@ -90,6 +90,8 @@
       hoveredWindow = null;
       isSnipMenuOpen = false;
       isDelayMenuOpen = false;
+    } else if (currentSnipType === 'window' && !hoveredWindow && desktopCapture && desktopCapture.windows.length > 0) {
+      hoveredWindow = desktopCapture.windows[0];
     }
   });
 
@@ -246,8 +248,17 @@
 
   async function executeWindowCapture(win: WindowRect) {
     let cropped = '';
-    const sourceImg = frozenCanvasEl;
-    if (sourceImg && sourceImg.width > 0) {
+    let sourceImg: CanvasImageSource | null = frozenCanvasEl;
+    if ((!sourceImg || (sourceImg as HTMLCanvasElement).width === 0) && frameBitmap) {
+      sourceImg = frameBitmap;
+    }
+
+    const srcW = sourceImg && 'width' in sourceImg ? (sourceImg as { width: number }).width : (desktopCapture?.width || 1920);
+    const srcH = sourceImg && 'height' in sourceImg ? (sourceImg as { height: number }).height : (desktopCapture?.height || 1080);
+    let finalW = Math.max(1, Math.min(srcW - Math.max(0, Math.round(win.x)), Math.round(win.width)));
+    let finalH = Math.max(1, Math.min(srcH - Math.max(0, Math.round(win.y)), Math.round(win.height)));
+
+    if (sourceImg) {
       try {
         cropped = cropRectangle(sourceImg, {
           x: win.x,
@@ -271,8 +282,8 @@
 
     onCapture({
       imageUrl: cropped || frameSrc,
-      width: win.width,
-      height: win.height,
+      width: finalW,
+      height: finalH,
       mode: 'window',
       delay: currentDelay,
     });
@@ -294,8 +305,17 @@
     }
 
     if (currentSnipType === 'window') {
-      if (hoveredWindow) {
-        executeWindowCapture(hoveredWindow);
+      let targetWin = hoveredWindow;
+      if (!targetWin && desktopCapture && desktopCapture.windows.length > 0) {
+        const { scaleX, scaleY } = getScale();
+        targetWin = findHoveredWindow(
+          desktopCapture.windows,
+          e.clientX * scaleX,
+          e.clientY * scaleY
+        );
+      }
+      if (targetWin) {
+        executeWindowCapture(targetWin);
       } else {
         executeFullscreenCapture();
       }

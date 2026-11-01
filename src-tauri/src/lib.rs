@@ -1,10 +1,13 @@
 use base64::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use tauri::{Emitter, Manager};
+use zbus::blocking::Connection;
+use zbus::zvariant::Value;
 
 mod capture_kwin;
 
@@ -172,20 +175,154 @@ pub fn parse_wmctrl_line(line: &str) -> Option<WindowRect> {
     None
 }
 
-pub fn detect_desktop_windows(scale_factor: f64) -> Vec<WindowRect> {
-    let mut windows = Vec::new();
-    let scale = if scale_factor > 0.1 { scale_factor } else { 1.0 };
+fn get_kwin_window_info(
+    conn: &Connection,
+    id: &str,
+) -> Option<(String, i32, i32, u32, u32, bool, i32)> {
+    let reply = conn
+        .call_method(
+            Some("org.kde.KWin"),
+            "/KWin",
+            Some("org.kde.KWin"),
+            "getWindowInfo",
+            &(id,),
+        )
+        .ok()?;
+    let body = reply.body();
+    let map: HashMap<String, zbus::zvariant::OwnedValue> = body.deserialize().ok()?;
 
-    // 1. Try kdotool (KDE Wayland / X11)
+    let caption = match map.get("caption") {
+        Some(val) => match &**val {
+            Value::Str(s) => s.to_string(),
+            _ => String::new(),
+        },
+        None => String::new(),
+    };
+    let minimized = match map.get("minimized") {
+        Some(val) => match &**val {
+            Value::Bool(b) => *b,
+            _ => false,
+        },
+        None => false,
+    };
+    let win_type = match map.get("type") {
+        Some(val) => match &**val {
+            Value::I32(i) => *i,
+            Value::U32(u) => *u as i32,
+            Value::F64(f) => *f as i32,
+            _ => 0,
+        },
+        None => 0,
+    };
+    let width = match map.get("width") {
+        Some(val) => match &**val {
+            Value::F64(f) => f.round().max(0.0) as u32,
+            Value::I32(i) => (*i).max(0) as u32,
+            Value::U32(u) => *u,
+            _ => 0,
+        },
+        None => 0,
+    };
+    let height = match map.get("height") {
+        Some(val) => match &**val {
+            Value::F64(f) => f.round().max(0.0) as u32,
+            Value::I32(i) => (*i).max(0) as u32,
+            Value::U32(u) => *u,
+            _ => 0,
+        },
+        None => 0,
+    };
+    let x = match map.get("x") {
+        Some(val) => match &**val {
+            Value::F64(f) => f.round() as i32,
+            Value::I32(i) => *i,
+            Value::U32(u) => *u as i32,
+            _ => 0,
+        },
+        None => 0,
+    };
+    let y = match map.get("y") {
+        Some(val) => match &**val {
+            Value::F64(f) => f.round() as i32,
+            Value::I32(i) => *i,
+            Value::U32(u) => *u as i32,
+            _ => 0,
+        },
+        None => 0,
+    };
+
+    Some((caption, x, y, width, height, minimized, win_type))
+}
+
+pub fn detect_desktop_windows() -> (Vec<WindowRect>, Option<(u32, u32)>) {
+    let mut windows = Vec::new();
+    let mut desktop_bounds: Option<(u32, u32)> = None;
+    let mut active_window_id: Option<String> = None;
+
+    if let Ok(active_out) = Command::new("kdotool").arg("getactivewindow").output() {
+        if active_out.status.success() {
+            let id = String::from_utf8_lossy(&active_out.stdout).trim().to_string();
+            if !id.is_empty() {
+                active_window_id = Some(id);
+            }
+        }
+    }
+
+    // 1. Try KWin (KDE Wayland / X11)
     if let Ok(search_output) = Command::new("kdotool").args(["search", ""]).output() {
         if search_output.status.success() {
             let ids_str = String::from_utf8_lossy(&search_output.stdout);
+            let conn = Connection::session().ok();
+
             for id in ids_str.lines() {
                 let id = id.trim();
                 if id.is_empty() {
                     continue;
                 }
 
+                if let Some(c) = &conn {
+                    if let Some((title, x, y, width, height, minimized, win_type)) =
+                        get_kwin_window_info(c, id)
+                    {
+                        if win_type == 1
+                            || title.starts_with("Desktop @")
+                            || title.starts_with("Desktop —")
+                        {
+                            if width > 0 && height > 0 {
+                                desktop_bounds = Some((width, height));
+                            }
+                            continue;
+                        }
+
+                        // Exclude minimized windows, non-normal windows, desktop panels, and Sniplex
+                        if minimized || win_type != 0 {
+                            continue;
+                        }
+
+                        let trimmed_title = title.trim();
+                        if trimmed_title.is_empty()
+                            || trimmed_title == "Sniplex"
+                            || trimmed_title.starts_with("Sniplex -")
+                            || trimmed_title == "Plasma"
+                        {
+                            continue;
+                        }
+
+                        if width > 40 && height > 40 {
+                            windows.push(WindowRect {
+                                id: id.to_string(),
+                                title,
+                                x,
+                                y,
+                                width,
+                                height,
+                            });
+                        }
+                        continue;
+                    }
+                }
+
+                // Fallback to kdotool subprocesses if D-Bus getWindowInfo was unavailable
                 let mut title = String::new();
                 if let Ok(name_out) = Command::new("kdotool").args(["getwindowname", id]).output() {
                     if name_out.status.success() {
@@ -193,9 +330,26 @@ pub fn detect_desktop_windows(scale_factor: f64) -> Vec<WindowRect> {
                     }
                 }
 
-                // Exclude Sniplex itself (exact match or window title prefix)
                 let trimmed_title = title.trim();
-                if trimmed_title == "Sniplex" || trimmed_title.starts_with("Sniplex -") {
+                if trimmed_title.starts_with("Desktop @") || trimmed_title.starts_with("Desktop —") {
+                    if let Ok(geo_out) = Command::new("kdotool").args(["getwindowgeometry", id]).output() {
+                        if geo_out.status.success() {
+                            let geo_str = String::from_utf8_lossy(&geo_out.stdout);
+                            if let Some((_, _, width, height)) = parse_kdotool_geometry(&geo_str) {
+                                if width > 0 && height > 0 {
+                                    desktop_bounds = Some((width, height));
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                if trimmed_title.is_empty()
+                    || trimmed_title == "Sniplex"
+                    || trimmed_title.starts_with("Sniplex -")
+                    || trimmed_title == "Plasma"
+                {
                     continue;
                 }
 
@@ -207,10 +361,10 @@ pub fn detect_desktop_windows(scale_factor: f64) -> Vec<WindowRect> {
                                 windows.push(WindowRect {
                                     id: id.to_string(),
                                     title,
-                                    x: (x as f64 * scale).round() as i32,
-                                    y: (y as f64 * scale).round() as i32,
-                                    width: (width as f64 * scale).round() as u32,
-                                    height: (height as f64 * scale).round() as u32,
+                                    x,
+                                    y,
+                                    width,
+                                    height,
                                 });
                             }
                         }
@@ -226,13 +380,12 @@ pub fn detect_desktop_windows(scale_factor: f64) -> Vec<WindowRect> {
             if wm_out.status.success() {
                 let list_str = String::from_utf8_lossy(&wm_out.stdout);
                 for line in list_str.lines() {
-                    if let Some(mut rect) = parse_wmctrl_line(line) {
+                    if let Some(rect) = parse_wmctrl_line(line) {
                         let trimmed = rect.title.trim();
-                        if trimmed != "Sniplex" && !trimmed.starts_with("Sniplex -") {
-                            rect.x = (rect.x as f64 * scale).round() as i32;
-                            rect.y = (rect.y as f64 * scale).round() as i32;
-                            rect.width = (rect.width as f64 * scale).round() as u32;
-                            rect.height = (rect.height as f64 * scale).round() as u32;
+                        if trimmed != "Sniplex"
+                            && !trimmed.starts_with("Sniplex -")
+                            && !trimmed.starts_with("Desktop")
+                        {
                             windows.push(rect);
                         }
                     }
@@ -241,7 +394,71 @@ pub fn detect_desktop_windows(scale_factor: f64) -> Vec<WindowRect> {
         }
     }
 
-    windows
+    // Prioritize active window if known
+    if let Some(active_id) = active_window_id {
+        if let Some(pos) = windows.iter().position(|w| w.id == active_id) {
+            let active_win = windows.remove(pos);
+            windows.insert(0, active_win);
+        }
+    }
+
+    (windows, desktop_bounds)
+}
+
+pub fn normalize_window_coordinates(
+    windows: &mut [WindowRect],
+    target_width: u32,
+    target_height: u32,
+    logical_bounds: Option<(u32, u32)>,
+) {
+    if target_width == 0 || target_height == 0 || windows.is_empty() {
+        return;
+    }
+
+    let (max_w, max_h) = match logical_bounds {
+        Some((lw, lh)) if lw > 0 && lh > 0 => (lw, lh),
+        _ => {
+            let mut mw = 0u32;
+            let mut mh = 0u32;
+            for w in windows.iter() {
+                mw = mw.max((w.x.max(0) as u32).saturating_add(w.width));
+                mh = mh.max((w.y.max(0) as u32).saturating_add(w.height));
+            }
+            if mw > 0 && mh > 0 {
+                (mw, mh)
+            } else {
+                (target_width, target_height)
+            }
+        }
+    };
+
+    let scale_x = if max_w > 0 {
+        target_width as f64 / max_w as f64
+    } else {
+        1.0
+    };
+    let scale_y = if max_h > 0 {
+        target_height as f64 / max_h as f64
+    } else {
+        1.0
+    };
+
+    for w in windows.iter_mut() {
+        let scaled_x = (w.x as f64 * scale_x).round() as i32;
+        let scaled_y = (w.y as f64 * scale_y).round() as i32;
+        let scaled_w = (w.width as f64 * scale_x).round() as u32;
+        let scaled_h = (w.height as f64 * scale_y).round() as u32;
+
+        let clamped_x = scaled_x.max(0).min(target_width.saturating_sub(1) as i32);
+        let clamped_y = scaled_y.max(0).min(target_height.saturating_sub(1) as i32);
+        let clamped_w = scaled_w.min(target_width.saturating_sub(clamped_x as u32)).max(1);
+        let clamped_h = scaled_h.min(target_height.saturating_sub(clamped_y as u32)).max(1);
+
+        w.x = clamped_x;
+        w.y = clamped_y;
+        w.width = clamped_w;
+        w.height = clamped_h;
+    }
 }
 
 /// Checks that the capture buffer is fully written (PNG IEND trailer or a
@@ -429,14 +646,10 @@ fn run_capture_session(
     prune_capture_files();
 
     let frame_path = unique_capture_path("frame", "png");
-    let scale_factor = app
-        .get_webview_window("main")
-        .and_then(|main| main.scale_factor().ok())
-        .unwrap_or(1.0);
 
     // Window geometry is collected in parallel and only needed for highlight
     // frames, so it must not delay the overlay reveal.
-    let win_thread = std::thread::spawn(move || detect_desktop_windows(scale_factor));
+    let win_thread = std::thread::spawn(move || detect_desktop_windows());
 
     // Prefer the compositor: it returns raw pixels with no external process and
     // no image encoding at all.
@@ -508,13 +721,17 @@ fn run_capture_session(
         return Ok(());
     }
 
+    let (mut windows, desktop_bounds) = win_thread.join().unwrap_or_default();
+    normalize_window_coordinates(&mut windows, width, height, desktop_bounds);
+    timing_log("windows_detected");
+
     if let Ok(mut lock) = state.session.lock() {
         *lock = Some(CaptureSession {
             capture: DesktopCapture {
                 image_data_url: String::new(),
                 width,
                 height,
-                windows: Vec::new(),
+                windows: windows.clone(),
             },
             mode,
             snip_type,
@@ -522,23 +739,12 @@ fn run_capture_session(
         });
     }
 
-    // Notify overlay window that the frozen frame is ready to be pulled over IPC
+    // Notify overlay window that the frozen frame and session metadata are ready
     if let Some(overlay) = app.get_webview_window("overlay") {
         let _ = overlay.emit("session-ready", ());
-    }
-    timing_log("session_sent");
-
-    // Window highlight frames arrive after the overlay is already visible
-    let windows = win_thread.join().unwrap_or_default();
-    timing_log("windows_detected");
-    if let Ok(mut lock) = state.session.lock() {
-        if let Some(session) = lock.as_mut() {
-            session.capture.windows = windows.clone();
-        }
-    }
-    if let Some(overlay) = app.get_webview_window("overlay") {
         let _ = overlay.emit("windows-ready", &windows);
     }
+    timing_log("session_sent");
 
     Ok(())
 }
@@ -629,19 +835,13 @@ fn capture_desktop(app: tauri::AppHandle) -> Result<DesktopCapture, String> {
     // 2. Prepare fast in-memory RAM disk temp path (/dev/shm)
     let temp_path_str = unique_capture_path("freeze", "png");
 
-    let scale_factor = if let Some(main) = app.get_webview_window("main") {
-        main.scale_factor().unwrap_or(1.0)
-    } else {
-        1.0
-    };
-
     // Run screen grab and window detection in parallel across separate threads
     let thread_path = temp_path_str.to_string();
     let screen_thread = std::thread::spawn(move || execute_screen_grab(&thread_path));
-    let win_thread = std::thread::spawn(move || detect_desktop_windows(scale_factor));
+    let win_thread = std::thread::spawn(move || detect_desktop_windows());
 
     let captured = screen_thread.join().unwrap_or(false);
-    let windows = win_thread.join().unwrap_or_default();
+    let (mut windows, desktop_bounds) = win_thread.join().unwrap_or_default();
 
     if !captured {
         if let Some(main) = app.get_webview_window("main") {
@@ -655,6 +855,7 @@ fn capture_desktop(app: tauri::AppHandle) -> Result<DesktopCapture, String> {
     let _ = fs::remove_file(&temp_path_str);
 
     let (width, height, mime) = parse_image_dimensions(&bytes).unwrap_or((1920, 1080, "image/png"));
+    normalize_window_coordinates(&mut windows, width, height, desktop_bounds);
     let image_data_url = format!("data:{};base64,{}", mime, BASE64_STANDARD.encode(&bytes));
 
     Ok(DesktopCapture {
@@ -739,8 +940,10 @@ fn restore_window(window: tauri::Window, was_maximized: Option<bool>) -> Result<
 
 #[tauri::command]
 fn get_detected_windows(window: tauri::Window) -> Result<Vec<WindowRect>, String> {
-    let scale = window.scale_factor().unwrap_or(1.0);
-    Ok(detect_desktop_windows(scale))
+    let (mut windows, desktop_bounds) = detect_desktop_windows();
+    let size = window.inner_size().unwrap_or(tauri::PhysicalSize { width: 1920, height: 1080 });
+    normalize_window_coordinates(&mut windows, size.width, size.height, desktop_bounds);
+    Ok(windows)
 }
 
 #[tauri::command]
@@ -875,5 +1078,54 @@ mod tests {
         assert_eq!(rect.width, 800);
         assert_eq!(rect.height, 600);
         assert_eq!(rect.title, "Sample Editor Window");
+    }
+
+    #[test]
+    fn test_normalize_window_coordinates() {
+        let mut windows = vec![
+            WindowRect {
+                id: "w1".into(),
+                title: "Maximized IDE".into(),
+                x: 0,
+                y: 0,
+                width: 1324,
+                height: 701,
+            },
+            WindowRect {
+                id: "w2".into(),
+                title: "Editor Dialog".into(),
+                x: 258,
+                y: 84,
+                width: 808,
+                height: 533,
+            },
+        ];
+
+        // 1324x745 logical bounds to 1920x1080 capture frame
+        normalize_window_coordinates(&mut windows, 1920, 1080, Some((1324, 745)));
+
+        assert_eq!(windows[0].x, 0);
+        assert_eq!(windows[0].y, 0);
+        assert_eq!(windows[0].width, 1920);
+        assert_eq!(windows[0].height, 1016);
+
+        assert_eq!(windows[1].x, 374);
+        assert_eq!(windows[1].y, 122);
+        assert_eq!(windows[1].width, 1172);
+        assert_eq!(windows[1].height, 773);
+    }
+
+    #[test]
+    fn test_live_detect() {
+        let (mut wins, bounds) = detect_desktop_windows();
+        println!("LIVE DETECT: bounds={:?}", bounds);
+        for w in &wins {
+            println!("  RAW WIN: {} (id={}) at {},{} {}x{}", w.title, w.id, w.x, w.y, w.width, w.height);
+        }
+        normalize_window_coordinates(&mut wins, 1920, 1080, bounds);
+        for w in &wins {
+            println!("  NORM WIN: {} (id={}) at {},{} {}x{}", w.title, w.id, w.x, w.y, w.width, w.height);
+        }
+        assert!(!wins.is_empty(), "Should detect at least 1 window on desktop");
     }
 }

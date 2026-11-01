@@ -53,8 +53,34 @@
   let isOverlayActive = $state(false);
   let shortcuts = $state<ShortcutItem[]>(loadShortcuts());
 
-  let mode = $state<CaptureMode>('snip');
-  let snipType = $state<SnipType>('rectangle');
+  const savedMode =
+    typeof localStorage !== 'undefined'
+      ? (localStorage.getItem('sniplex_mode') as CaptureMode)
+      : 'snip';
+  let mode = $state<CaptureMode>(['snip', 'record'].includes(savedMode) ? savedMode : 'snip');
+
+  $effect(() => {
+    try {
+      localStorage.setItem('sniplex_mode', mode);
+    } catch {}
+  });
+
+  const savedSnipType =
+    typeof localStorage !== 'undefined'
+      ? (localStorage.getItem('sniplex_snip_type') as SnipType)
+      : 'rectangle';
+  let snipType = $state<SnipType>(
+    ['rectangle', 'window', 'fullscreen', 'freeform'].includes(savedSnipType)
+      ? savedSnipType
+      : 'rectangle'
+  );
+
+  $effect(() => {
+    try {
+      localStorage.setItem('sniplex_snip_type', snipType);
+    } catch {}
+  });
+
   const savedDelay =
     typeof localStorage !== 'undefined'
       ? (Number(localStorage.getItem('sniplex_delay')) as SnipDelay)
@@ -66,6 +92,27 @@
       localStorage.setItem('sniplex_delay', String(delay));
     } catch {}
   });
+
+  function handleModeChange(m: CaptureMode) {
+    mode = m;
+    try {
+      localStorage.setItem('sniplex_mode', m);
+    } catch {}
+  }
+
+  function handleSnipTypeChange(t: SnipType) {
+    snipType = t;
+    try {
+      localStorage.setItem('sniplex_snip_type', t);
+    } catch {}
+  }
+
+  function handleDelayChange(d: SnipDelay) {
+    delay = d;
+    try {
+      localStorage.setItem('sniplex_delay', String(d));
+    } catch {}
+  }
 
   let activeTool = $state<ToolType>('pen');
   let penColor = $state('#0078d4');
@@ -309,6 +356,16 @@
         await fetchSession();
       } else {
         await initTiming();
+
+        if (typeof localStorage !== 'undefined') {
+          const sm = localStorage.getItem('sniplex_mode') as CaptureMode;
+          if (['snip', 'record'].includes(sm)) mode = sm;
+          const st = localStorage.getItem('sniplex_snip_type') as SnipType;
+          if (['rectangle', 'window', 'fullscreen', 'freeform'].includes(st)) snipType = st;
+          const sd = Number(localStorage.getItem('sniplex_delay')) as SnipDelay;
+          if ([0, 3, 5, 10].includes(sd)) delay = sd;
+        }
+
         // Main editor window: listen for snip completion and delay synchronization from overlay window
         const { listen } = await import('@tauri-apps/api/event');
         listen<CapturePayload>('snip-captured', (event) => {
@@ -316,7 +373,20 @@
         });
         listen<{ delay: SnipDelay }>('snip-delay-changed', (event) => {
           if (event.payload && typeof event.payload.delay === 'number') {
-            delay = event.payload.delay;
+            handleDelayChange(event.payload.delay);
+          }
+        });
+        listen<{ mode: CaptureMode }>('snip-mode-changed', (event) => {
+          if (event.payload && ['snip', 'record'].includes(event.payload.mode)) {
+            handleModeChange(event.payload.mode);
+          }
+        });
+        listen<{ snipType: SnipType }>('snip-type-changed', (event) => {
+          if (
+            event.payload &&
+            ['rectangle', 'window', 'fullscreen', 'freeform'].includes(event.payload.snipType)
+          ) {
+            handleSnipTypeChange(event.payload.snipType);
           }
         });
 
@@ -326,6 +396,18 @@
               const val = Number(e.newValue) as SnipDelay;
               if ([0, 3, 5, 10].includes(val)) {
                 delay = val;
+              }
+            }
+            if (e.key === 'sniplex_mode' && e.newValue !== null) {
+              const val = e.newValue as CaptureMode;
+              if (['snip', 'record'].includes(val)) {
+                mode = val;
+              }
+            }
+            if (e.key === 'sniplex_snip_type' && e.newValue !== null) {
+              const val = e.newValue as SnipType;
+              if (['rectangle', 'window', 'fullscreen', 'freeform'].includes(val)) {
+                snipType = val;
               }
             }
           });
@@ -362,6 +444,28 @@
     }
   }
 
+  async function handleOverlayModeChange(m: CaptureMode) {
+    overlayMode = m;
+    try {
+      localStorage.setItem('sniplex_mode', m);
+    } catch {}
+    if (isTauriEnvironment()) {
+      const { emit } = await import('@tauri-apps/api/event');
+      await emit('snip-mode-changed', { mode: m });
+    }
+  }
+
+  async function handleOverlaySnipTypeChange(t: SnipType) {
+    overlaySnipType = t;
+    try {
+      localStorage.setItem('sniplex_snip_type', t);
+    } catch {}
+    if (isTauriEnvironment()) {
+      const { emit } = await import('@tauri-apps/api/event');
+      await emit('snip-type-changed', { snipType: t });
+    }
+  }
+
   async function handleOverlayClose() {
     isOverlayReady = false;
     overlaySized = false;
@@ -373,9 +477,16 @@
         requestAnimationFrame(() => resolve());
       });
     });
+    try {
+      localStorage.setItem('sniplex_delay', String(overlayDelay));
+      localStorage.setItem('sniplex_mode', overlayMode);
+      localStorage.setItem('sniplex_snip_type', overlaySnipType);
+    } catch {}
     if (isTauriEnvironment()) {
       const { emit } = await import('@tauri-apps/api/event');
       await emit('snip-delay-changed', { delay: overlayDelay });
+      await emit('snip-mode-changed', { mode: overlayMode });
+      await emit('snip-type-changed', { snipType: overlaySnipType });
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('cancel_capture');
     }
@@ -543,7 +654,14 @@
     }
 
     if ('delay' in payload && typeof payload.delay === 'number') {
-      delay = payload.delay as SnipDelay;
+      handleDelayChange(payload.delay as SnipDelay);
+    }
+
+    if ('mode' in payload && payload.mode) {
+      const pMode = payload.mode as SnipType;
+      if (['rectangle', 'window', 'fullscreen', 'freeform'].includes(pMode)) {
+        handleSnipTypeChange(pMode);
+      }
     }
 
     tabs = [
@@ -666,8 +784,8 @@
       desktopCapture={overlayCapture}
       onClose={handleOverlayClose}
       onCapture={handleOverlayCapture}
-      onModeChange={(m) => (overlayMode = m)}
-      onSnipTypeChange={(t) => (overlaySnipType = t)}
+      onModeChange={handleOverlayModeChange}
+      onSnipTypeChange={handleOverlaySnipTypeChange}
       onDelayChange={handleOverlayDelayChange}
       onScreenDraw={() => {}}
       onTextActions={() => {}}
@@ -704,9 +822,9 @@
         {isCropping}
         onTriggerNew={handleTriggerNew}
         onTriggerOcr={handleTriggerOcr}
-        onModeChange={(m) => mode = m}
-        onSnipTypeChange={(t) => snipType = t}
-        onDelayChange={(d) => delay = d}
+        onModeChange={handleModeChange}
+        onSnipTypeChange={handleSnipTypeChange}
+        onDelayChange={handleDelayChange}
         onToolChange={(t) => activeTool = t}
         onPenColorChange={(c) => penColor = c}
         onPenSizeChange={(s) => penSize = s}

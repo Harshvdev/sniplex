@@ -73,25 +73,36 @@ export function cropRectangle(
   source: CanvasImageSource,
   rect: { x: number; y: number; w: number; h: number }
 ): string {
-  const width = Math.max(1, Math.round(rect.w));
-  const height = Math.max(1, Math.round(rect.h));
+  const srcW =
+    ('width' in source
+      ? (source as { width: number }).width
+      : (source as unknown as { naturalWidth: number }).naturalWidth) || Math.round(rect.w);
+  const srcH =
+    ('height' in source
+      ? (source as { height: number }).height
+      : (source as unknown as { naturalHeight: number }).naturalHeight) || Math.round(rect.h);
+
+  const sx = Math.max(0, Math.min(srcW - 1, Math.round(rect.x)));
+  const sy = Math.max(0, Math.min(srcH - 1, Math.round(rect.y)));
+  const sw = Math.max(1, Math.min(srcW - sx, Math.round(rect.w)));
+  const sh = Math.max(1, Math.min(srcH - sy, Math.round(rect.h)));
 
   const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
+  canvas.width = sw;
+  canvas.height = sh;
   const ctx = canvas.getContext('2d');
   if (!ctx) return '';
 
   ctx.drawImage(
     source,
-    rect.x,
-    rect.y,
-    rect.w,
-    rect.h,
+    sx,
+    sy,
+    sw,
+    sh,
     0,
     0,
-    width,
-    height
+    sw,
+    sh
   );
 
   return canvas.toDataURL('image/png');
