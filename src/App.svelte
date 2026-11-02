@@ -6,7 +6,7 @@
   import EmptyState from './lib/components/EmptyState.svelte';
   import FloatingOverlay from './lib/components/FloatingOverlay.svelte';
   import SettingsModal from './lib/components/SettingsModal.svelte';
-  import { Timer } from '@lucide/svelte';
+  import { AlertCircle, Check, Timer } from '@lucide/svelte';
   import { loadShortcuts, matchesShortcut, type ShortcutItem } from './lib/shortcuts';
   import type {
     CaptureMode,
@@ -20,10 +20,14 @@
     DesktopCapture,
     CapturePayload,
     WindowRect,
+    ZoomCommand,
+    CanvasAreaApi,
   } from './lib/types';
   import { captureDesktopDisplay, restoreDesktopWindow, isTauriEnvironment } from './lib/capture';
   import { initTiming, mark } from './lib/timing';
   import { playTimerChime } from './lib/audio';
+  import { clampZoom, zoomIn, zoomOut } from './lib/viewport';
+  import { copyImageToClipboard } from './lib/clipboard';
 
   // Svelte 5 Runes State
   let theme = $state<AppTheme>(
@@ -123,6 +127,21 @@
   let zoom = $state(100);
   let isCropping = $state(false);
 
+  // Canvas viewport handoff for zoom, fit, and composited exports.
+  let canvasArea = $state<CanvasAreaApi | null>(null);
+
+  // Clipboard synchronization state.
+  let autoCopy = $state<boolean>(loadAutoCopySetting());
+  let pendingAutoCopy = false;
+  let isCopying = false;
+
+  let copyToast = $state<{ message: string; ok: boolean } | null>(null);
+  let copyToastTimer: number | null = null;
+  let copyAnnouncement = $state('');
+  let announceTimer: number | null = null;
+  let autoCopyTimer: number | null = null;
+  let autoCopyTabId = '';
+
   // Tabs - initially empty, starts in EmptyState view
   let tabs = $state<TabItem[]>([]);
   let activeTabId = $state('');
@@ -146,7 +165,7 @@
       if (!dataUrl) return;
 
       const img = new Image();
-      img.onload = () => {
+      img.onload = async () => {
         const newId = `tab-${Date.now()}`;
         const newTab: TabItem = {
           id: newId,
@@ -160,6 +179,8 @@
         activeTabId = newId;
         view = 'editor';
         input.value = '';
+        await tick();
+        canvasArea?.fitToViewport();
       };
       img.src = dataUrl;
     };
@@ -179,18 +200,98 @@
     link.click();
   }
 
-  async function handleCopy() {
-    const canvas = document.querySelector('canvas');
-    if (!canvas) return;
+  function loadAutoCopySetting(): boolean {
+    if (typeof localStorage === 'undefined') return true;
+    const stored = localStorage.getItem('sniplex_auto_copy');
+    return stored === null ? true : stored === 'true';
+  }
+
+  function handleAutoCopyChange(value: boolean) {
+    autoCopy = value;
     try {
-      canvas.toBlob(async (blob) => {
-        if (!blob) return;
-        await navigator.clipboard.write([
-          new ClipboardItem({ 'image/png': blob }),
-        ]);
-      });
-    } catch (err) {
-      console.warn('Clipboard write error', err);
+      localStorage.setItem('sniplex_auto_copy', String(value));
+    } catch {}
+  }
+
+  function announceCopy(message: string) {
+    copyAnnouncement = '';
+    if (announceTimer) clearTimeout(announceTimer);
+    announceTimer = window.setTimeout(() => {
+      copyAnnouncement = message;
+      announceTimer = null;
+    }, 60);
+  }
+
+  function showCopyToast(ok: boolean) {
+    copyToast = { message: ok ? 'Copied to clipboard' : 'Copy failed', ok };
+    if (copyToastTimer) clearTimeout(copyToastTimer);
+    copyToastTimer = window.setTimeout(() => {
+      copyToast = null;
+      copyToastTimer = null;
+    }, 2200);
+  }
+
+  /** Copies the flattened composite bitmap from the editor canvas. */
+  async function copyComposite(): Promise<boolean> {
+    if (!activeTab || !canvasArea || isCopying) return false;
+
+    isCopying = true;
+    try {
+      const blob = await canvasArea.exportPngBlob();
+      if (!blob) {
+        announceCopy('Could not copy image to clipboard');
+        showCopyToast(false);
+        return false;
+      }
+
+      const result = await copyImageToClipboard(blob);
+      if (result.ok) {
+        announceCopy('Composite image copied to clipboard');
+        showCopyToast(true);
+        return true;
+      }
+
+      console.warn('Clipboard copy error:', result.error);
+      announceCopy('Could not copy image to clipboard');
+      showCopyToast(false);
+      return false;
+    } finally {
+      isCopying = false;
+    }
+  }
+
+  function handleCanvasImageReady() {
+    if (!pendingAutoCopy) return;
+    pendingAutoCopy = false;
+    if (autoCopy) void copyComposite();
+  }
+
+  function handleCanvasMutated() {
+    if (!autoCopy || !activeTab) return;
+
+    autoCopyTabId = activeTabId;
+    if (autoCopyTimer) clearTimeout(autoCopyTimer);
+    autoCopyTimer = window.setTimeout(() => {
+      autoCopyTimer = null;
+      if (activeTabId === autoCopyTabId) void copyComposite();
+    }, 700);
+  }
+
+  function handleCanvasZoom(next: number) {
+    zoom = clampZoom(next);
+  }
+
+  function handleZoomCommand(command: ZoomCommand) {
+    if (!activeTab) return;
+
+    if (command === 'in') {
+      zoom = clampZoom(zoomIn(zoom));
+    } else if (command === 'out') {
+      zoom = clampZoom(zoomOut(zoom));
+    } else if (command === 'actual') {
+      zoom = 100;
+    } else {
+      canvasArea?.fitToViewport();
     }
   }
 
@@ -232,6 +333,30 @@
       overlayFrameBitmap = null;
     }
   }
+
+  // Zoom shortcuts and Ctrl+wheel scale the capture inside the canvas. The
+  // platform page zoom is disabled natively; these guards keep the webview from
+  // ever acting on the same input as a page-level zoom.
+  onMount(() => {
+    const blockZoomWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) e.preventDefault();
+    };
+    const blockZoomKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const key = e.key;
+      if (key === '+' || key === '=' || key === '-' || key === '_' || key === '0') {
+        e.preventDefault();
+      }
+    };
+
+    window.addEventListener('wheel', blockZoomWheel, { passive: false, capture: true });
+    window.addEventListener('keydown', blockZoomKey, { capture: true });
+
+    return () => {
+      window.removeEventListener('wheel', blockZoomWheel, { capture: true });
+      window.removeEventListener('keydown', blockZoomKey, { capture: true });
+    };
+  });
 
   onMount(async () => {
     // The capture overlay is a full-screen capture surface, so it is always
@@ -677,6 +802,10 @@
     ];
     activeTabId = newId;
     desktopCapture = null;
+    pendingAutoCopy = imageUrl.length > 0;
+
+    await tick();
+    canvasArea?.fitToViewport();
   }
 
   function handleTriggerOcr() {
@@ -743,6 +872,36 @@
     if (newCaptureShortcut && matchesShortcut(e, newCaptureShortcut.keys)) {
       e.preventDefault();
       handleTriggerNew();
+      return;
+    }
+
+    const modifier = e.ctrlKey || e.metaKey;
+    const hasImageTab = view === 'editor' && tabs.length > 0;
+
+    // Ctrl + Plus / Ctrl + Minus: step the canvas zoom
+    if (hasImageTab && modifier && (e.key === '+' || e.key === '=')) {
+      e.preventDefault();
+      zoom = clampZoom(zoomIn(zoom));
+      return;
+    }
+
+    if (hasImageTab && modifier && (e.key === '-' || e.key === '_')) {
+      e.preventDefault();
+      zoom = clampZoom(zoomOut(zoom));
+      return;
+    }
+
+    // Ctrl + 0: fit the capture to the viewport
+    if (hasImageTab && modifier && e.key === '0') {
+      e.preventDefault();
+      canvasArea?.fitToViewport();
+      return;
+    }
+
+    // Ctrl + C: copy the flattened composite bitmap
+    if (hasImageTab && modifier && e.key.toLowerCase() === 'c') {
+      e.preventDefault();
+      void copyComposite();
       return;
     }
 
@@ -831,9 +990,10 @@
         onHighlighterColorChange={(c) => highlighterColor = c}
         onHighlighterSizeChange={(s) => highlighterSize = s}
         onShapeKindChange={(s) => shapeKind = s}
-        onZoomChange={(z) => zoom = z}
+        onZoomCommand={handleZoomCommand}
+        onZoomChange={(z) => zoom = clampZoom(z)}
         onSave={handleSave}
-        onCopy={handleCopy}
+        onCopy={() => { void copyComposite(); }}
         onOpenSettings={() => view = 'settings'}
         onOpenFile={handleOpenFile}
         onPrint={handlePrint}
@@ -851,6 +1011,8 @@
       {#if view === 'settings'}
         <SettingsModal
           {theme}
+          {autoCopy}
+          onAutoCopyChange={handleAutoCopyChange}
           onClose={() => view = tabs.length > 0 ? 'editor' : 'empty'}
           onThemeChange={(t) => theme = t}
           onShortcutsChange={(s) => shortcuts = s}
@@ -859,6 +1021,7 @@
         <EmptyState />
       {:else}
         <CanvasArea
+          bind:this={canvasArea}
           imageUrl={activeTab?.imageUrl || ''}
           width={activeTab?.width || 960}
           height={activeTab?.height || 540}
@@ -871,6 +1034,9 @@
           {isCropping}
           onApplyCrop={() => isCropping = false}
           onCancelCrop={() => isCropping = false}
+          onZoomChange={handleCanvasZoom}
+          onImageReady={handleCanvasImageReady}
+          onCanvasMutated={handleCanvasMutated}
         />
       {/if}
 
@@ -907,6 +1073,28 @@
           }}
         />
       {/if}
+
+      <!-- Clipboard confirmation toast -->
+      {#if copyToast}
+        <div
+          class="fixed bottom-9 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 px-3.5 py-2 bg-white/95 dark:bg-[#181d28]/95 border border-black/10 dark:border-white/10 rounded-full shadow-[0_8px_32px_rgba(0,0,0,0.3)] backdrop-blur-md text-xs font-medium text-neutral-800 dark:text-neutral-100 select-none pointer-events-none animate-in fade-in zoom-in-95 duration-150"
+          aria-hidden="true"
+        >
+          {#if copyToast.ok}
+            <span class="w-4 h-4 rounded-full flex items-center justify-center bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+              <Check class="w-3 h-3 stroke-[2.6]" />
+            </span>
+          {:else}
+            <span class="w-4 h-4 rounded-full flex items-center justify-center bg-rose-500/15 text-rose-600 dark:text-rose-400">
+              <AlertCircle class="w-3 h-3 stroke-[2.2]" />
+            </span>
+          {/if}
+          <span>{copyToast.message}</span>
+        </div>
+      {/if}
+
+      <!-- Accessible live region for clipboard announcements -->
+      <div class="sr-only" role="status" aria-live="polite">{copyAnnouncement}</div>
 
       <!-- Active Timer Countdown Toast -->
       {#if countdown !== null}

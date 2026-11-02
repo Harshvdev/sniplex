@@ -3136,12 +3136,15 @@ name = "sniplex"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "gobject-sys",
+ "gtk",
  "log",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-log",
+ "webkit2gtk",
  "zbus",
 ]
 

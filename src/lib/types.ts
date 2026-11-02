@@ -22,6 +22,13 @@ export type AppTheme = 'light' | 'dark' | 'system';
 
 export type AppView = 'editor' | 'empty' | 'settings';
 
+export type ZoomCommand = 'in' | 'out' | 'actual' | 'fit';
+
+export interface CanvasAreaApi {
+  exportPngBlob(): Promise<Blob | null>;
+  fitToViewport(): boolean;
+}
+
 export interface TabItem {
   id: string;
   title: string;

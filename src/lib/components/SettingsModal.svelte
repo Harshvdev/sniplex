@@ -13,18 +13,21 @@
 
   let {
     theme = 'dark',
+    autoCopy = true,
     onClose = () => {},
     onThemeChange = (t: AppTheme) => {},
+    onAutoCopyChange = (value: boolean) => {},
     onShortcutsChange = (s: ShortcutItem[]) => {},
   }: {
     theme: AppTheme;
+    autoCopy: boolean;
     onClose: () => void;
     onThemeChange: (t: AppTheme) => void;
+    onAutoCopyChange?: (value: boolean) => void;
     onShortcutsChange?: (s: ShortcutItem[]) => void;
   } = $props();
 
   // Settings reactive state
-  let autoCopy = $state(true);
   let autoSave = $state(true);
   let askToSave = $state(true);
   let multipleInstances = $state(false);
@@ -280,7 +283,7 @@
             role="switch"
             aria-checked={autoCopy}
             class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {autoCopy ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
-            onclick={() => autoCopy = !autoCopy}
+            onclick={() => onAutoCopyChange(!autoCopy)}
             title="Toggle automatic copy"
           >
             <span

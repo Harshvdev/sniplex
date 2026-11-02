@@ -30,7 +30,7 @@
   import PenFlyout from './PenFlyout.svelte';
   import HighlighterFlyout from './HighlighterFlyout.svelte';
   import ShapesFlyout from './ShapesFlyout.svelte';
-  import type { CaptureMode, SnipType, SnipDelay, ToolType, ShapeKind } from '../types';
+  import type { CaptureMode, SnipType, SnipDelay, ToolType, ShapeKind, ZoomCommand } from '../types';
 
   let {
     mode = 'snip',
@@ -55,7 +55,8 @@
     onHighlighterColorChange = (c: string) => {},
     onHighlighterSizeChange = (s: number) => {},
     onShapeKindChange = (s: ShapeKind) => {},
-    onZoomChange = (z: number) => {},
+    onZoomCommand = (command: ZoomCommand) => {},
+    onZoomChange = (value: number) => {},
     onSave = () => {},
     onCopy = () => {},
     onOpenSettings = () => {},
@@ -87,7 +88,8 @@
     onHighlighterColorChange: (c: string) => void;
     onHighlighterSizeChange: (s: number) => void;
     onShapeKindChange: (s: ShapeKind) => void;
-    onZoomChange: (z: number) => void;
+    onZoomCommand: (command: ZoomCommand) => void;
+    onZoomChange: (value: number) => void;
     onSave: () => void;
     onCopy: () => void;
     onOpenSettings: () => void;
@@ -135,6 +137,13 @@
     { id: 'window', label: 'Window' },
     { id: 'fullscreen', label: 'Full screen' },
     { id: 'freeform', label: 'Freeform' },
+  ];
+
+  const zoomPresets = [10, 25, 50, 100, 200, 400, 800, 1600, 3200];
+
+  const zoomCommands: { id: ZoomCommand; label: string; hint: string }[] = [
+    { id: 'fit', label: 'Fit to window', hint: 'Ctrl + 0' },
+    { id: 'actual', label: 'View actual size (100%)', hint: '' },
   ];
 </script>
 
@@ -454,24 +463,40 @@
           onclick={() => toggleFlyout('zoom')}
           title="Zoom level"
         >
-          <span>{zoom}%</span>
+          <span>{Math.round(zoom)}%</span>
           <ChevronDown class="w-3 h-3" />
         </button>
 
         {#if activeFlyout === 'zoom'}
-          <div class="absolute top-full mt-1.5 right-0 z-50 min-w-[130px] bg-white dark:bg-[#181d28] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_12px_32px_rgba(0,0,0,0.45)] py-1 flex flex-col">
-            {#each [50, 75, 100, 150, 200] as z}
-              <button
-                type="button"
-                class="px-3 py-1.5 text-[12px] text-left hover:bg-black/[0.05] dark:hover:bg-white/[0.06] rounded-[4px] mx-1 transition-colors flex items-center justify-between"
-                onclick={() => { onZoomChange(z); activeFlyout = null; }}
-              >
-                <span>{z}%</span>
-                {#if zoom === z}
-                  <Check class="w-3.5 h-3.5 text-[#0067c0] dark:text-[#60cdff]" />
-                {/if}
-              </button>
-            {/each}
+          <div class="absolute top-full mt-1.5 right-0 z-50 w-[212px] bg-white dark:bg-[#181d28] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_12px_32px_rgba(0,0,0,0.45)] p-1.5 flex flex-col">
+            <div class="grid grid-cols-3 gap-1">
+              {#each zoomPresets as preset}
+                <button
+                  type="button"
+                  class="h-7 rounded-[4px] text-[11px] font-mono transition-colors {Math.round(zoom) === preset ? 'bg-[#0067c0] text-white' : 'text-neutral-700 dark:text-neutral-300 hover:bg-black/[0.05] dark:hover:bg-white/[0.06]'}"
+                  onclick={() => { onZoomChange(preset); activeFlyout = null; }}
+                >
+                  {preset}%
+                </button>
+              {/each}
+            </div>
+
+            <div class="mt-1.5 pt-1 border-t border-black/[0.06] dark:border-white/[0.08] flex flex-col">
+              {#each zoomCommands as command}
+                <button
+                  type="button"
+                  class="px-2 py-1.5 text-[12px] text-left hover:bg-black/[0.05] dark:hover:bg-white/[0.06] rounded-[4px] transition-colors flex items-center justify-between gap-4"
+                  onclick={() => { onZoomCommand(command.id); activeFlyout = null; }}
+                >
+                  <span class="truncate">{command.label}</span>
+                  {#if command.hint}
+                    <kbd class="shrink-0 text-[10px] font-mono text-neutral-400 dark:text-neutral-500">{command.hint}</kbd>
+                  {:else if Math.round(zoom) === 100}
+                    <Check class="w-3.5 h-3.5 shrink-0 text-[#0067c0] dark:text-[#60cdff]" />
+                  {/if}
+                </button>
+              {/each}
+            </div>
           </div>
         {/if}
       </div>

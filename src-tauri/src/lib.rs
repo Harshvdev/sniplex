@@ -946,6 +946,77 @@ fn get_detected_windows(window: tauri::Window) -> Result<Vec<WindowRect>, String
     Ok(windows)
 }
 
+fn decode_png_base64(encoded: &str) -> Result<Vec<u8>, String> {
+    let bytes = BASE64_STANDARD
+        .decode(encoded.trim())
+        .map_err(|error| format!("Invalid clipboard image payload: {}", error))?;
+
+    if bytes.len() < 8 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
+        return Err("Clipboard image payload is not a PNG".to_string());
+    }
+
+    Ok(bytes)
+}
+
+fn run_clipboard_writer(command: &mut Command, png: &[u8]) -> Result<(), String> {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(png).map_err(|error| error.to_string())?;
+    }
+
+    let status = child.wait().map_err(|error| error.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("clipboard helper exited with {}", status))
+    }
+}
+
+/// Publishes PNG bytes as a system clipboard image. Wayland uses wl-copy and
+/// X11 uses xclip; both helpers fork to keep serving the selection.
+fn write_png_to_clipboard(png: &[u8]) -> Result<String, String> {
+    let mut failures = Vec::new();
+
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        let mut command = Command::new("wl-copy");
+        command.args(["--type", "image/png"]);
+        match run_clipboard_writer(&mut command, png) {
+            Ok(()) => return Ok("wayland".to_string()),
+            Err(error) => failures.push(format!("wl-copy: {}", error)),
+        }
+    }
+
+    if std::env::var_os("DISPLAY").is_some() {
+        let mut command = Command::new("xclip");
+        command.args(["-selection", "clipboard", "-t", "image/png"]);
+        match run_clipboard_writer(&mut command, png) {
+            Ok(()) => return Ok("x11".to_string()),
+            Err(error) => failures.push(format!("xclip: {}", error)),
+        }
+    }
+
+    if failures.is_empty() {
+        Err("No system clipboard backend is available".to_string())
+    } else {
+        Err(format!(
+            "Unable to copy the image to the system clipboard: {}",
+            failures.join("; ")
+        ))
+    }
+}
+
+#[tauri::command]
+fn copy_image_to_clipboard(png_base64: String) -> Result<String, String> {
+    let png = decode_png_base64(&png_base64)?;
+    write_png_to_clipboard(&png)
+}
+
 #[tauri::command]
 fn select_folder() -> Result<Option<String>, String> {
     if let Ok(output) = Command::new("zenity")
@@ -993,6 +1064,7 @@ pub fn run() {
             cancel_capture,
             restore_window,
             get_detected_windows,
+            copy_image_to_clipboard,
             exit_app
         ])
         .on_window_event(|window, event| {
@@ -1005,6 +1077,64 @@ pub fn run() {
         .setup(|app| {
             app.manage(AppCaptureState::default());
             prune_capture_files();
+
+            // The interface never zooms. A touchpad pinch belongs to the capture
+            // canvas, so WebKitGTK's internal page-zoom gesture is detached and
+            // replaced by one that forwards the scale to the frontend instead.
+            #[cfg(target_os = "linux")]
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.with_webview(|webview| {
+                    use gtk::prelude::*;
+                    use webkit2gtk::WebViewExt;
+
+                    let view = webview.inner();
+
+                    fn forward_pinch(
+                        view: &webkit2gtk::WebView,
+                        phase: &str,
+                        scale: f64,
+                        x: f64,
+                        y: f64,
+                    ) {
+                        let script = format!(
+                            "window.__sniplexPinch && window.__sniplexPinch('{phase}', {scale}, {x}, {y})"
+                        );
+                        #[allow(deprecated)]
+                        view.run_javascript(&script, gtk::gio::Cancellable::NONE, |_| {});
+                    }
+
+                    // WebKit stores its page-zoom gesture on the view under this
+                    // key. Removing its handlers stops the whole interface from
+                    // scaling while the gesture object itself stays intact.
+                    unsafe {
+                        if let Some(gesture) = view.data::<gtk::GestureZoom>("wk-view-zoom-gesture")
+                        {
+                            gobject_sys::g_signal_handlers_destroy(gesture.as_ptr().cast());
+                        }
+                    }
+
+                    let gesture = gtk::GestureZoom::new(&view);
+                    gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+
+                    let begin_view = view.clone();
+                    gesture.connect_begin(move |gesture, _| {
+                        let (x, y) = gesture.bounding_box_center().unwrap_or((0.0, 0.0));
+                        forward_pinch(&begin_view, "start", 1.0, x, y);
+                    });
+
+                    let update_view = view.clone();
+                    gesture.connect_scale_changed(move |gesture, scale| {
+                        let (x, y) = gesture.bounding_box_center().unwrap_or((0.0, 0.0));
+                        forward_pinch(&update_view, "update", scale, x, y);
+                    });
+
+                    let end_view = view.clone();
+                    gesture.connect_end(move |gesture, _| {
+                        let (x, y) = gesture.bounding_box_center().unwrap_or((0.0, 0.0));
+                        forward_pinch(&end_view, "end", 1.0, x, y);
+                    });
+                });
+            }
             // Warm the external capture tool's interpreter/runtime cache so
             // the first fallback snip does not pay for a cold start. The
             // compositor path needs no helper, and spawning one would only
@@ -1113,6 +1243,23 @@ mod tests {
         assert_eq!(windows[1].y, 122);
         assert_eq!(windows[1].width, 1172);
         assert_eq!(windows[1].height, 773);
+    }
+
+    #[test]
+    fn test_decode_png_base64_accepts_png_signature() {
+        let mut payload = b"\x89PNG\r\n\x1a\n".to_vec();
+        payload.extend_from_slice(&[0, 0, 0, 13]);
+        let encoded = BASE64_STANDARD.encode(&payload);
+
+        let decoded = decode_png_base64(&encoded).expect("valid PNG payload");
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn test_decode_png_base64_rejects_other_payloads() {
+        assert!(decode_png_base64(&BASE64_STANDARD.encode(b"GIF89a")).is_err());
+        assert!(decode_png_base64("not base64 !!").is_err());
+        assert!(decode_png_base64("").is_err());
     }
 
     #[test]

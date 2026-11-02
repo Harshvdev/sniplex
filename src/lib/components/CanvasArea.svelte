@@ -1,7 +1,21 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { Check, X } from '@lucide/svelte';
-  import type { ToolType, ShapeKind } from '../types';
+  import { onMount, tick } from 'svelte';
+  import { Check, Minus, Plus, X } from '@lucide/svelte';
+  import type { ToolType } from '../types';
+  import { pixelLinePoints } from '../drawing';
+  import { registerPinchBridge, type PinchPhase } from '../pinch';
+  import {
+    MAX_ZOOM,
+    ZOOM_SLIDER_STEPS,
+    clampZoom,
+    computeFitZoom,
+    nudgeZoom,
+    parseZoomInput,
+    scrollDeltaToAnchor,
+    sliderPositionToZoom,
+    wheelZoom,
+    zoomToSliderPosition,
+  } from '../viewport';
 
   let {
     imageUrl = '',
@@ -16,6 +30,9 @@
     isCropping = false,
     onApplyCrop = () => {},
     onCancelCrop = () => {},
+    onZoomChange = (z: number) => {},
+    onImageReady = () => {},
+    onCanvasMutated = () => {},
   }: {
     imageUrl: string;
     width?: number;
@@ -29,17 +46,67 @@
     isCropping: boolean;
     onApplyCrop: () => void;
     onCancelCrop: () => void;
+    onZoomChange?: (z: number) => void;
+    onImageReady?: () => void;
+    onCanvasMutated?: () => void;
   } = $props();
 
+  let viewportEl = $state<HTMLDivElement | null>(null);
   let canvasEl = $state<HTMLCanvasElement | null>(null);
   let ctx = $state<CanvasRenderingContext2D | null>(null);
   let isDrawing = $state(false);
-  let lastX = $state(0);
-  let lastY = $state(0);
+  let lastX = 0;
+  let lastY = 0;
+  let didStroke = false;
+
+  // Navigation state: Space or the middle mouse button drags the view.
+  let pointerInside = $state(false);
+  let spaceHeld = $state(false);
+  let isPanning = $state(false);
+  let panPointerId: number | null = null;
+  let panStartX = 0;
+  let panStartY = 0;
+  let panScrollLeft = 0;
+  let panScrollTop = 0;
+
+  // Touchscreen state: one-finger pan/draw and two-finger pinch + pan.
+  const touchPoints = new Map<number, { x: number; y: number }>();
+  let touchGesture: {
+    startDistance: number;
+    startZoom: number;
+    imageX: number;
+    imageY: number;
+    originX: number;
+    originY: number;
+  } | null = null;
+  let suppressSingleTouch = false;
+  let gestureScrollPending = false;
+  let gestureToken = 0;
+  let ignoreZoomCommit = false;
+
+  // Trackpad pinch forwarded by the native shell.
+  let nativePinch: {
+    baseZoom: number;
+    appliedZoom: number;
+    imageX: number;
+    imageY: number;
+    originX: number;
+    originY: number;
+  } | null = null;
 
   // Canvas dimensions
   let canvasWidth = $state(960);
   let canvasHeight = $state(540);
+
+  // The canvas is displayed at its true pixel size for the current zoom so the
+  // viewport can scroll the whole capture at 100% and above.
+  let displayWidth = $derived((canvasWidth * zoom) / 100);
+  let displayHeight = $derived((canvasHeight * zoom) / 100);
+  // Pixel edges stay crisp when magnifying past 2x so individual pixels are readable.
+  let imageRendering = $derived(zoom >= 200 ? 'pixelated' : 'auto');
+  let panCursor = $derived(spaceHeld);
+
+  let imageLoadToken = 0;
 
   onMount(() => {
     canvasWidth = width || 960;
@@ -50,12 +117,36 @@
       ctx = canvasEl.getContext('2d');
       renderCanvas();
     }
+
+    const viewport = viewportEl;
+    if (!viewport) return;
+
+    viewport.addEventListener('wheel', handleWheel, { passive: false });
+
+    window.addEventListener('keydown', handleWindowKeyDown);
+    window.addEventListener('keyup', handleWindowKeyUp);
+    window.addEventListener('blur', resetInputState);
+
+    const unregisterPinch = registerPinchBridge(handleNativePinch);
+
+    return () => {
+      unregisterPinch();
+      viewport.removeEventListener('wheel', handleWheel);
+      window.removeEventListener('keydown', handleWindowKeyDown);
+      window.removeEventListener('keyup', handleWindowKeyUp);
+      window.removeEventListener('blur', resetInputState);
+    };
   });
 
   $effect(() => {
-    if (imageUrl) {
+    const url = imageUrl;
+    const token = ++imageLoadToken;
+
+    if (url) {
       const img = new Image();
       img.onload = () => {
+        if (token !== imageLoadToken) return;
+
         canvasWidth = img.naturalWidth || width || 960;
         canvasHeight = img.naturalHeight || height || 540;
         if (canvasEl) {
@@ -67,8 +158,9 @@
             context.drawImage(img, 0, 0);
           }
         }
+        onImageReady();
       };
-      img.src = imageUrl;
+      img.src = url;
     } else {
       canvasWidth = width || 960;
       canvasHeight = height || 540;
@@ -93,75 +185,610 @@
     }
   }
 
-  function startDrawing(e: MouseEvent) {
-    if (isCropping || !ctx || !canvasEl) return;
-    const rect = canvasEl.getBoundingClientRect();
-    const scaleX = canvasWidth / rect.width;
-    const scaleY = canvasHeight / rect.height;
-    isDrawing = true;
-    lastX = (e.clientX - rect.left) * scaleX;
-    lastY = (e.clientY - rect.top) * scaleY;
+  function isTypingTarget(target: EventTarget | null): boolean {
+    const element = target as HTMLElement | null;
+    if (!element) return false;
+    const tag = element.tagName;
+    return (
+      tag === 'INPUT' ||
+      tag === 'TEXTAREA' ||
+      tag === 'SELECT' ||
+      element.isContentEditable === true
+    );
   }
 
-  function draw(e: MouseEvent) {
-    if (!isDrawing || !ctx || !canvasEl) return;
-    const rect = canvasEl.getBoundingClientRect();
-    const scaleX = canvasWidth / rect.width;
-    const scaleY = canvasHeight / rect.height;
-    const x = (e.clientX - rect.left) * scaleX;
-    const y = (e.clientY - rect.top) * scaleY;
+  function handleWindowKeyDown(e: KeyboardEvent) {
+    if (e.code !== 'Space' && e.key !== ' ') return;
+    if (!pointerInside || isTypingTarget(e.target)) return;
+    spaceHeld = true;
+    e.preventDefault();
+  }
 
+  function handleWindowKeyUp(e: KeyboardEvent) {
+    if (e.code === 'Space' || e.key === ' ') {
+      spaceHeld = false;
+    }
+  }
+
+  function resetInputState() {
+    spaceHeld = false;
+    finishStroke();
+    stopPan();
+    touchGesture = null;
+    gestureToken += 1;
+    suppressSingleTouch = false;
+    touchPoints.clear();
+  }
+
+  function handleWheel(e: WheelEvent) {
+    if (!(e.ctrlKey || e.metaKey) || !canvasEl) return;
+    e.preventDefault();
+
+    const canvasRect = canvasEl.getBoundingClientRect();
+    if (canvasRect.width <= 0) return;
+
+    const scale = zoom / 100;
+    const imagePointX = (e.clientX - canvasRect.left) / scale;
+    const imagePointY = (e.clientY - canvasRect.top) / scale;
+
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? window.innerHeight : 1;
+    const next = clampZoom(wheelZoom(zoom, e.deltaY * unit));
+    if (Math.abs(next - zoom) < 0.001) return;
+
+    onZoomChange(next);
+    const newScale = next / 100;
+
+    void tick().then(() => {
+      if (!viewportEl || !canvasEl) return;
+      const nextRect = canvasEl.getBoundingClientRect();
+      viewportEl.scrollLeft += scrollDeltaToAnchor(
+        nextRect.left,
+        e.clientX,
+        imagePointX,
+        newScale
+      );
+      viewportEl.scrollTop += scrollDeltaToAnchor(
+        nextRect.top,
+        e.clientY,
+        imagePointY,
+        newScale
+      );
+    });
+  }
+
+  function capturePointer(pointerId: number) {
+    try {
+      viewportEl?.setPointerCapture?.(pointerId);
+    } catch {}
+  }
+
+  function releasePointer(pointerId: number) {
+    try {
+      if (viewportEl?.hasPointerCapture?.(pointerId)) {
+        viewportEl.releasePointerCapture(pointerId);
+      }
+    } catch {}
+  }
+
+  function clientToImage(clientX: number, clientY: number) {
+    const canvas = canvasEl;
+    if (!canvas) return { x: 0, y: 0 };
+
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (clientX - rect.left) * (canvasWidth / rect.width),
+      y: (clientY - rect.top) * (canvasHeight / rect.height),
+    };
+  }
+
+  function isInsideCanvas(clientX: number, clientY: number): boolean {
+    const canvas = canvasEl;
+    if (!canvas) return false;
+
+    const rect = canvas.getBoundingClientRect();
+    return (
+      clientX >= rect.left &&
+      clientX <= rect.right &&
+      clientY >= rect.top &&
+      clientY <= rect.bottom
+    );
+  }
+
+  function isMarkupTool(): boolean {
+    return (
+      activeTool === 'pen' ||
+      activeTool === 'touch' ||
+      activeTool === 'highlighter' ||
+      activeTool === 'eraser'
+    );
+  }
+
+  function usesPixelBrush(): boolean {
+    return (
+      (activeTool === 'pen' || activeTool === 'touch') &&
+      Math.max(1, Math.round(penSize)) <= 1
+    );
+  }
+
+  function paintPixel(x: number, y: number) {
+    if (!ctx) return;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = penColor;
+    ctx.fillRect(x, y, 1, 1);
+  }
+
+  function paintPixelLine(fromX: number, fromY: number, toX: number, toY: number) {
+    if (!ctx) return;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = penColor;
+    for (const point of pixelLinePoints(fromX, fromY, toX, toY)) {
+      ctx.fillRect(point.x, point.y, 1, 1);
+    }
+  }
+
+  function strokeSegment(
+    fromX: number,
+    fromY: number,
+    toX: number,
+    toY: number,
+    color: string,
+    lineWidth: number,
+    cap: CanvasLineCap
+  ) {
+    if (!ctx) return;
     ctx.beginPath();
-    ctx.moveTo(lastX, lastY);
-    ctx.lineTo(x, y);
+    ctx.moveTo(fromX, fromY);
+    ctx.lineTo(toX, toY);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.lineCap = cap;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+  }
 
-    if (activeTool === 'pen') {
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.strokeStyle = penColor;
-      ctx.lineWidth = penSize;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.stroke();
+  function startStrokeAt(clientX: number, clientY: number) {
+    if (!ctx || !canvasEl || !isMarkupTool()) return;
+
+    const point = clientToImage(clientX, clientY);
+    isDrawing = true;
+    didStroke = false;
+    lastX = point.x;
+    lastY = point.y;
+
+    // A one-pixel pen colors the pixel under the cursor immediately, so a
+    // single click leaves an exact dot instead of a soft antialiased smudge.
+    if (usesPixelBrush()) {
+      paintPixel(Math.floor(point.x), Math.floor(point.y));
+      didStroke = true;
+    }
+  }
+
+  function drawStrokeTo(clientX: number, clientY: number) {
+    if (!isDrawing || !ctx || !canvasEl) return;
+
+    const point = clientToImage(clientX, clientY);
+
+    if (activeTool === 'pen' || activeTool === 'touch') {
+      if (usesPixelBrush()) {
+        paintPixelLine(lastX, lastY, point.x, point.y);
+      } else {
+        strokeSegment(lastX, lastY, point.x, point.y, penColor, penSize, 'round');
+      }
     } else if (activeTool === 'highlighter') {
       ctx.globalCompositeOperation = 'multiply';
-      ctx.strokeStyle = highlighterColor;
-      ctx.lineWidth = highlighterSize;
-      ctx.lineCap = 'square';
-      ctx.lineJoin = 'miter';
-      ctx.stroke();
+      strokeSegment(
+        lastX,
+        lastY,
+        point.x,
+        point.y,
+        highlighterColor,
+        highlighterSize,
+        'square'
+      );
       ctx.globalCompositeOperation = 'source-over';
     } else if (activeTool === 'eraser') {
       ctx.globalCompositeOperation = 'destination-out';
-      ctx.lineWidth = 20;
-      ctx.lineCap = 'round';
-      ctx.stroke();
+      strokeSegment(lastX, lastY, point.x, point.y, '#000000', 20, 'round');
       ctx.globalCompositeOperation = 'source-over';
     }
 
-    lastX = x;
-    lastY = y;
+    didStroke = true;
+    lastX = point.x;
+    lastY = point.y;
   }
 
-  function stopDrawing() {
+  function finishStroke() {
+    if (isDrawing && didStroke) {
+      onCanvasMutated();
+    }
     isDrawing = false;
+    didStroke = false;
+  }
+
+  function startPan(clientX: number, clientY: number, pointerId: number) {
+    if (!viewportEl) return;
+    isPanning = true;
+    panPointerId = pointerId;
+    panStartX = clientX;
+    panStartY = clientY;
+    panScrollLeft = viewportEl.scrollLeft;
+    panScrollTop = viewportEl.scrollTop;
+  }
+
+  function panTo(clientX: number, clientY: number) {
+    if (!isPanning || !viewportEl) return;
+    viewportEl.scrollLeft = panScrollLeft - (clientX - panStartX);
+    viewportEl.scrollTop = panScrollTop - (clientY - panStartY);
+  }
+
+  function stopPan() {
+    isPanning = false;
+    panPointerId = null;
+  }
+
+  function blockMiddleButton(e: MouseEvent | PointerEvent) {
+    if (e.button === 1) e.preventDefault();
+  }
+
+  function touchMidpoint() {
+    if (touchPoints.size < 2) return null;
+    const [first, second] = [...touchPoints.values()];
+    return { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 };
+  }
+
+  function touchDistance() {
+    if (touchPoints.size < 2) return 0;
+    const [first, second] = [...touchPoints.values()];
+    return Math.hypot(first.x - second.x, first.y - second.y);
+  }
+
+  function beginTouchGesture() {
+    if (!canvasEl || !viewportEl) return;
+    const midpoint = touchMidpoint();
+    if (!midpoint) return;
+
+    const rect = canvasEl.getBoundingClientRect();
+    const scale = rect.width / canvasWidth || zoom / 100;
+    touchGesture = {
+      startDistance: Math.max(1, touchDistance()),
+      startZoom: zoom,
+      // Image point under the two fingertips.
+      imageX: (midpoint.x - rect.left) / scale,
+      imageY: (midpoint.y - rect.top) / scale,
+      // Canvas position in client space with the viewport at its origin, so
+      // both the zoom focus and the pan offset can be derived in one step
+      // without re-measuring the canvas while it is being resized.
+      originX: rect.left + viewportEl.scrollLeft,
+      originY: rect.top + viewportEl.scrollTop,
+    };
+    gestureToken += 1;
+  }
+
+  function gestureZoom(distance: number): number {
+    const gesture = touchGesture;
+    if (!gesture || distance <= 0) return zoom;
+    return clampZoom(gesture.startZoom * (distance / gesture.startDistance));
+  }
+
+  function applyTouchGesture() {
+    const gesture = touchGesture;
+    if (!gesture || !viewportEl) return;
+
+    const midpoint = touchMidpoint();
+    if (!midpoint) return;
+
+    const nextZoom = gestureZoom(touchDistance());
+    const zoomChanged = Math.abs(nextZoom - zoom) > 0.001;
+    if (zoomChanged) onZoomChange(nextZoom);
+
+    const scale = nextZoom / 100;
+    const targetLeft = gesture.originX + gesture.imageX * scale - midpoint.x;
+    const targetTop = gesture.originY + gesture.imageY * scale - midpoint.y;
+
+    // Two-finger drag without a scale change is a plain pan and can move the
+    // viewport immediately.
+    if (!zoomChanged) {
+      viewportEl.scrollLeft = targetLeft;
+      viewportEl.scrollTop = targetTop;
+      return;
+    }
+
+    // After a zoom the canvas must be laid out at its new size before the
+    // offset is applied, otherwise the browser clamps it to the old range.
+    if (gestureScrollPending) return;
+    const token = gestureToken;
+    gestureScrollPending = true;
+
+    void tick().then(() => {
+      gestureScrollPending = false;
+      const current = touchGesture;
+      if (token !== gestureToken || !current || !viewportEl) return;
+
+      const currentMidpoint = touchMidpoint();
+      if (!currentMidpoint) return;
+
+      const currentScale = gestureZoom(touchDistance()) / 100;
+      viewportEl.scrollLeft =
+        current.originX + current.imageX * currentScale - currentMidpoint.x;
+      viewportEl.scrollTop = current.originY + current.imageY * currentScale - currentMidpoint.y;
+    });
+  }
+
+  function handleNativePinch(phase: PinchPhase, scale: number, clientX: number, clientY: number) {
+    if (phase === 'end') {
+      nativePinch = null;
+      return;
+    }
+
+    if (phase === 'start') {
+      const canvas = canvasEl;
+      const viewport = viewportEl;
+      if (!canvas || !viewport) return;
+
+      const rect = canvas.getBoundingClientRect();
+      const currentScale = rect.width / canvasWidth || zoom / 100;
+      nativePinch = {
+        baseZoom: zoom,
+        appliedZoom: zoom,
+        imageX: (clientX - rect.left) / currentScale,
+        imageY: (clientY - rect.top) / currentScale,
+        originX: rect.left + viewport.scrollLeft,
+        originY: rect.top + viewport.scrollTop,
+      };
+      return;
+    }
+
+    const gesture = nativePinch;
+    if (!gesture || !viewportEl) return;
+
+    const next = clampZoom(gesture.baseZoom * scale);
+    if (Math.abs(next - gesture.appliedZoom) > 0.001) {
+      gesture.appliedZoom = next;
+      onZoomChange(next);
+    }
+
+    const nextScale = next / 100;
+    const targetLeft = gesture.originX + gesture.imageX * nextScale - clientX;
+    const targetTop = gesture.originY + gesture.imageY * nextScale - clientY;
+
+    // The canvas is resized by the zoom, so the offset has to be applied after
+    // it has been laid out or it is clamped against the old scroll range.
+    void tick().then(() => {
+      if (nativePinch !== gesture || !viewportEl) return;
+      viewportEl.scrollLeft = targetLeft;
+      viewportEl.scrollTop = targetTop;
+    });
+  }
+
+  function handleViewportPointerDown(e: PointerEvent) {
+    if (!viewportEl) return;
+
+    if (e.pointerType === 'touch') {
+      e.preventDefault();
+      touchPoints.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      capturePointer(e.pointerId);
+
+      if (touchPoints.size === 1) {
+        if (suppressSingleTouch) return;
+
+        // Touch Writing draws with one finger; otherwise one finger pans.
+        if (activeTool === 'touch' && !isCropping && isInsideCanvas(e.clientX, e.clientY)) {
+          startStrokeAt(e.clientX, e.clientY);
+        } else {
+          startPan(e.clientX, e.clientY, e.pointerId);
+        }
+      } else if (touchPoints.size === 2) {
+        finishStroke();
+        stopPan();
+        beginTouchGesture();
+      }
+      return;
+    }
+
+    const wantsPan = e.button === 1 || (e.button === 0 && spaceHeld);
+    if (wantsPan) {
+      e.preventDefault();
+      startPan(e.clientX, e.clientY, e.pointerId);
+      capturePointer(e.pointerId);
+      return;
+    }
+
+    // Ctrl is a zoom modifier here, never a drawing modifier; ignoring it keeps
+    // the old Ctrl+drag habit from leaving a stray stroke.
+    if (
+      e.button === 0 &&
+      !(e.ctrlKey || e.metaKey) &&
+      !isCropping &&
+      isMarkupTool() &&
+      isInsideCanvas(e.clientX, e.clientY)
+    ) {
+      e.preventDefault();
+      startStrokeAt(e.clientX, e.clientY);
+      capturePointer(e.pointerId);
+    }
+  }
+
+  function handleViewportPointerMove(e: PointerEvent) {
+    if (e.pointerType === 'touch') {
+      if (!touchPoints.has(e.pointerId)) return;
+      touchPoints.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+      if (touchGesture && touchPoints.size >= 2) {
+        e.preventDefault();
+        applyTouchGesture();
+        return;
+      }
+      if (suppressSingleTouch) return;
+
+      if (isDrawing) {
+        e.preventDefault();
+        drawStrokeTo(e.clientX, e.clientY);
+      } else if (isPanning && panPointerId === e.pointerId) {
+        e.preventDefault();
+        panTo(e.clientX, e.clientY);
+      }
+      return;
+    }
+
+    if (isDrawing) {
+      if ((e.buttons & 1) === 0) {
+        finishStroke();
+        return;
+      }
+      drawStrokeTo(e.clientX, e.clientY);
+    } else if (isPanning && panPointerId === e.pointerId) {
+      panTo(e.clientX, e.clientY);
+    }
+  }
+
+  function handleViewportPointerUp(e: PointerEvent) {
+    releasePointer(e.pointerId);
+
+    if (e.pointerType === 'touch') {
+      touchPoints.delete(e.pointerId);
+
+      if (touchGesture) {
+        touchGesture = null;
+        gestureToken += 1;
+        suppressSingleTouch = touchPoints.size > 0;
+      }
+
+      finishStroke();
+      if (isPanning && (panPointerId === e.pointerId || touchPoints.size === 0)) {
+        stopPan();
+      }
+
+      if (touchPoints.size === 0) {
+        suppressSingleTouch = false;
+        touchGesture = null;
+        gestureToken += 1;
+      }
+      return;
+    }
+
+    finishStroke();
+    stopPan();
+  }
+
+  /** Returns the flattened composite bitmap (base capture plus all markup). */
+  export function exportPngBlob(): Promise<Blob | null> {
+    const canvas = canvasEl;
+    if (!canvas) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      try {
+        canvas.toBlob((blob) => resolve(blob), 'image/png');
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+
+  /** Scales the current image so the whole capture is visible in the viewport. */
+  export function fitToViewport(): boolean {
+    const viewport = viewportEl;
+    if (!viewport) return false;
+
+    const style = getComputedStyle(viewport);
+    const padX =
+      (Number.parseFloat(style.paddingLeft) || 0) + (Number.parseFloat(style.paddingRight) || 0);
+    const padY =
+      (Number.parseFloat(style.paddingTop) || 0) + (Number.parseFloat(style.paddingBottom) || 0);
+    const availableWidth = viewport.clientWidth - padX;
+    const availableHeight = viewport.clientHeight - padY;
+
+    if (availableWidth <= 0 || availableHeight <= 0) return false;
+
+    onZoomChange(
+      computeFitZoom(
+        availableWidth,
+        availableHeight,
+        width || canvasWidth,
+        height || canvasHeight
+      )
+    );
+    return true;
+  }
+
+  /** Moves the zoom by a single percentage point. */
+  function handleZoomStep(delta: number) {
+    onZoomChange(nudgeZoom(zoom, delta));
+  }
+
+  function handleZoomSliderInput(e: Event) {
+    const position = Number((e.target as HTMLInputElement).value);
+    if (!Number.isFinite(position)) return;
+    onZoomChange(sliderPositionToZoom(position));
+  }
+
+  function handleZoomInputFocus(e: FocusEvent) {
+    const input = e.currentTarget as HTMLInputElement;
+    requestAnimationFrame(() => input.select());
+  }
+
+  function handleZoomInputKeyDown(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      (e.currentTarget as HTMLInputElement).blur();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      ignoreZoomCommit = true;
+      (e.currentTarget as HTMLInputElement).blur();
+    }
+  }
+
+  function handleZoomInputBlur(e: FocusEvent) {
+    const input = e.currentTarget as HTMLInputElement;
+
+    if (ignoreZoomCommit) {
+      ignoreZoomCommit = false;
+      input.value = `${Math.round(zoom)}%`;
+      return;
+    }
+
+    const parsed = parseZoomInput(input.value);
+    if (parsed === null) {
+      input.value = `${Math.round(zoom)}%`;
+      return;
+    }
+
+    onZoomChange(parsed);
+    input.value = `${Math.round(parsed)}%`;
   }
 </script>
 
-<div class="flex-1 overflow-auto bg-[#e5e7eb] dark:bg-[#07090e] p-6 flex relative select-none">
-  <!-- Interactive Viewport Wrapper with Dynamic Zoom -->
+<div class="flex-1 relative flex flex-col overflow-hidden bg-[#e5e7eb] dark:bg-[#07090e]">
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<div
+  bind:this={viewportEl}
+  role="region"
+  aria-label="Capture canvas viewport"
+  class="flex-1 overflow-auto p-6 flex select-none overscroll-contain touch-none"
+  class:cursor-grab={panCursor && !isPanning}
+  class:cursor-grabbing={isPanning}
+  onpointerenter={() => (pointerInside = true)}
+  onpointerleave={() => {
+    pointerInside = false;
+    if (!isPanning && !isDrawing) spaceHeld = false;
+  }}
+  onpointerdown={handleViewportPointerDown}
+  onpointermove={handleViewportPointerMove}
+  onpointerup={handleViewportPointerUp}
+  onpointercancel={handleViewportPointerUp}
+  onmousedown={blockMiddleButton}
+  onauxclick={blockMiddleButton}
+>
+  <!-- Interactive Viewport Wrapper with True Zoom Sizing -->
   <div
-    class="m-auto relative shadow-[0_16px_48px_rgba(0,0,0,0.18)] dark:shadow-[0_16px_48px_rgba(0,0,0,0.45)] border border-black/10 dark:border-white/10 rounded-sm transition-transform duration-100 ease-out bg-white"
-    style="transform: scale({zoom / 100}); transform-origin: center center;"
+    class="m-auto relative shrink-0 shadow-[0_16px_48px_rgba(0,0,0,0.18)] dark:shadow-[0_16px_48px_rgba(0,0,0,0.45)] border border-black/10 dark:border-white/10 rounded-sm bg-white"
   >
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <canvas
       bind:this={canvasEl}
-      class="block cursor-crosshair"
-      style="max-width: min({canvasWidth}px, calc(100vw - 64px)); max-height: min({canvasHeight}px, calc(100vh - 150px)); width: auto; height: auto;"
-      onmousedown={startDrawing}
-      onmousemove={draw}
-      onmouseup={stopDrawing}
-      onmouseleave={stopDrawing}
+      class="block touch-none {isPanning || panCursor
+        ? isPanning
+          ? 'cursor-grabbing'
+          : 'cursor-grab'
+        : 'cursor-crosshair'}"
+      style="width: {displayWidth}px; height: {displayHeight}px; image-rendering: {imageRendering};"
     ></canvas>
 
     <!-- Crop Overlay with 8-Handle Bounding Box -->
@@ -201,11 +828,54 @@
       </div>
     {/if}
   </div>
+</div>
 
-  <!-- Resolution & Zoom Status Bar at bottom right -->
-  <div class="absolute bottom-3 right-4 flex items-center gap-2 px-2.5 py-1 bg-white/80 dark:bg-[#181d28]/80 border border-black/[0.08] dark:border-white/[0.08] rounded-[6px] shadow-sm text-[11px] font-mono text-neutral-600 dark:text-neutral-400 backdrop-blur-sm pointer-events-none">
-    <span>{canvasWidth} × {canvasHeight} px</span>
-    <span class="text-neutral-300 dark:text-neutral-600">|</span>
-    <span>{zoom}%</span>
-  </div>
+<!-- Zoom control -->
+<div
+  class="absolute bottom-3 right-4 flex items-center gap-1.5 pl-1.5 pr-2.5 py-1 bg-white/90 dark:bg-[#181d28]/90 border border-black/[0.08] dark:border-white/[0.08] rounded-full shadow-sm text-[11px] font-mono text-neutral-600 dark:text-neutral-400 backdrop-blur-sm"
+>
+  <button
+    type="button"
+    class="w-5 h-5 flex items-center justify-center rounded-[4px] hover:bg-black/[0.06] dark:hover:bg-white/[0.08] text-neutral-600 dark:text-neutral-300 transition-colors cursor-pointer"
+    title="Zoom out by 1%"
+    aria-label="Zoom out by 1 percent"
+    onclick={() => handleZoomStep(-1)}
+  >
+    <Minus class="w-3.5 h-3.5" />
+  </button>
+
+  <input
+    type="range"
+    min="0"
+    max={ZOOM_SLIDER_STEPS}
+    step="1"
+    value={zoomToSliderPosition(zoom)}
+    aria-label="Zoom level"
+    aria-valuetext={`${Math.round(zoom)}%`}
+    class="w-28 cursor-pointer accent-[#0067c0] dark:accent-[#60cdff]"
+    oninput={handleZoomSliderInput}
+  />
+
+  <button
+    type="button"
+    class="w-5 h-5 flex items-center justify-center rounded-[4px] hover:bg-black/[0.06] dark:hover:bg-white/[0.08] text-neutral-600 dark:text-neutral-300 transition-colors cursor-pointer"
+    title="Zoom in by 1%"
+    aria-label="Zoom in by 1 percent"
+    onclick={() => handleZoomStep(1)}
+  >
+    <Plus class="w-3.5 h-3.5" />
+  </button>
+
+  <input
+    type="text"
+    inputmode="numeric"
+    value={`${Math.round(zoom)}%`}
+    title="Click to type a zoom percentage"
+    aria-label="Zoom percentage"
+    class="w-12 px-1 py-0.5 bg-transparent border-0 outline-none rounded-[4px] text-right tabular-nums select-text cursor-text hover:bg-black/[0.05] focus:bg-black/[0.07] dark:hover:bg-white/[0.07] dark:focus:bg-white/[0.1] text-neutral-600 dark:text-neutral-300 font-mono text-[11px] transition-colors"
+    onfocus={handleZoomInputFocus}
+    onblur={handleZoomInputBlur}
+    onkeydown={handleZoomInputKeyDown}
+  />
+</div>
 </div>
