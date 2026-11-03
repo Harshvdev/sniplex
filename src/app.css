@@ -37,10 +37,14 @@
     color-scheme: dark;
   }
 
-  /* Prevent browser default blue outline on buttons */
-  button:focus,
-  button:focus-visible {
-    outline: none !important;
+  /* Keyboard focus is always visible; pointer interaction stays quiet. */
+  :focus-visible {
+    outline: 2px solid #0067c0;
+    outline-offset: 2px;
+  }
+
+  html.dark :focus-visible {
+    outline-color: #60cdff;
   }
 
   /* Custom Fluent scrollbars */

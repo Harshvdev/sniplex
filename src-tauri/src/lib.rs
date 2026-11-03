@@ -4,12 +4,16 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Manager, WebviewUrl};
 use zbus::blocking::Connection;
 use zbus::zvariant::Value;
 
 mod capture_kwin;
+mod global_shortcuts;
+mod kde_shortcuts;
+mod launcher;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct WindowRect {
@@ -35,6 +39,11 @@ pub struct CaptureSession {
     pub mode: String,
     pub snip_type: String,
     pub delay: u32,
+    /// Window that started the capture; it receives the finished snip.
+    #[serde(default)]
+    pub origin_label: Option<String>,
+    #[serde(default)]
+    pub include_cursor: bool,
 }
 
 #[derive(Default)]
@@ -42,6 +51,24 @@ pub struct AppCaptureState {
     pub session: std::sync::Mutex<Option<CaptureSession>>,
     pub frame_path: std::sync::Mutex<Option<std::path::PathBuf>>,
     pub frame_raw: std::sync::Mutex<Option<capture_kwin::RawFrame>>,
+}
+
+/// Payloads waiting for a dedicated capture window to pull them on mount.
+#[derive(Default)]
+pub struct CaptureWindowStore {
+    pending: std::sync::Mutex<HashMap<String, serde_json::Value>>,
+}
+
+impl CaptureWindowStore {
+    fn insert(&self, token: &str, payload: serde_json::Value) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.insert(token.to_string(), payload);
+        }
+    }
+
+    fn take(&self, token: &str) -> Option<serde_json::Value> {
+        self.pending.lock().ok()?.remove(token)
+    }
 }
 
 /// Fast in-memory RAM disk, falling back to the system temp directory.
@@ -529,37 +556,46 @@ fn run_capture_tool(command: &mut Command, output_path: &str) -> bool {
     captured
 }
 
-fn execute_screen_grab(output_path: &str) -> bool {
+fn execute_screen_grab(output_path: &str, include_cursor: bool) -> bool {
     let desktop_env = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_uppercase();
 
     // 1. Try spectacle background capture (KDE Plasma)
-    if run_capture_tool(
-        Command::new("spectacle").args(["-b", "-n", "-o", output_path]),
-        output_path,
-    ) {
+    let mut spectacle = Command::new("spectacle");
+    spectacle.args(["-b", "-n", "-o", output_path]);
+    if include_cursor {
+        spectacle.arg("-p");
+    }
+    if run_capture_tool(&mut spectacle, output_path) {
         return true;
     }
 
     // Fallback: try spectacle with explicit fullscreen flag
-    if run_capture_tool(
-        Command::new("spectacle").args(["-b", "-n", "-f", "-o", output_path]),
-        output_path,
-    ) {
+    let mut spectacle_full = Command::new("spectacle");
+    spectacle_full.args(["-b", "-n", "-f", "-o", output_path]);
+    if include_cursor {
+        spectacle_full.arg("-p");
+    }
+    if run_capture_tool(&mut spectacle_full, output_path) {
         return true;
     }
 
     // 2. Try gnome-screenshot (GNOME on Wayland or X11; skip on KDE to avoid X11 assertion bugs)
-    if !desktop_env.contains("KDE")
-        && run_capture_tool(
-            Command::new("gnome-screenshot").args(["-f", output_path]),
-            output_path,
-        )
-    {
+    let mut gnome = Command::new("gnome-screenshot");
+    gnome.args(["-f", output_path]);
+    if include_cursor {
+        gnome.arg("-p");
+    }
+    if !desktop_env.contains("KDE") && run_capture_tool(&mut gnome, output_path) {
         return true;
     }
 
     // 3. Try grim (wlroots-based Wayland compositors: Sway, Hyprland, Wayfire)
-    if run_capture_tool(Command::new("grim").arg(output_path), output_path) {
+    let mut grim = Command::new("grim");
+    if include_cursor {
+        grim.arg("-c");
+    }
+    grim.arg(output_path);
+    if run_capture_tool(&mut grim, output_path) {
         return true;
     }
 
@@ -569,7 +605,12 @@ fn execute_screen_grab(output_path: &str) -> bool {
     }
 
     // 5. Try scrot (X11)
-    if run_capture_tool(Command::new("scrot").arg(output_path), output_path) {
+    let mut scrot = Command::new("scrot");
+    if include_cursor {
+        scrot.arg("-p");
+    }
+    scrot.arg(output_path);
+    if run_capture_tool(&mut scrot, output_path) {
         return true;
     }
 
@@ -635,12 +676,25 @@ fn publish_frame(state: &AppCaptureState, raw: Option<capture_kwin::RawFrame>, p
     }
 }
 
+fn show_origin(app: &tauri::AppHandle, label: Option<&str>) {
+    let target = label
+        .and_then(|label| app.get_webview_window(label))
+        .or_else(|| app.get_webview_window("main"));
+
+    if let Some(window) = target {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
 /// Performs the blocking parts of a capture session off the UI thread.
 fn run_capture_session(
     app: tauri::AppHandle,
     mode: String,
     snip_type: String,
     delay: u32,
+    origin_label: Option<String>,
+    include_cursor: bool,
 ) -> Result<(), String> {
     timing_log("capture_start");
     prune_capture_files();
@@ -666,7 +720,7 @@ fn run_capture_session(
             std::thread::sleep(std::time::Duration::from_millis(settle));
         }
         timing_log("native_start");
-        if let Ok(frame) = capture_kwin::capture_workspace() {
+        if let Ok(frame) = capture_kwin::capture_workspace(include_cursor) {
             native_frame = Some(frame);
         }
         timing_log("native_done");
@@ -676,7 +730,7 @@ fn run_capture_session(
         Some(_) => true,
         None => {
             timing_log("tool_start");
-            let result = execute_screen_grab(&frame_path);
+            let result = execute_screen_grab(&frame_path, include_cursor);
             timing_log("tool_done");
             result
         }
@@ -685,10 +739,7 @@ fn run_capture_session(
 
     if !captured {
         let _ = win_thread.join();
-        if let Some(main) = app.get_webview_window("main") {
-            let _ = main.show();
-            let _ = main.set_focus();
-        }
+        show_origin(&app, origin_label.as_deref());
         return Err("Unable to capture screen using available desktop capture backends".to_string());
     }
 
@@ -713,10 +764,14 @@ fn run_capture_session(
             "height": height,
             "mode": "fullscreen"
         });
-        if let Some(main) = app.get_webview_window("main") {
-            let _ = main.show();
-            let _ = main.set_focus();
-            let _ = main.emit("snip-captured", &payload);
+        let target = origin_label
+            .as_deref()
+            .and_then(|label| app.get_webview_window(label))
+            .or_else(|| app.get_webview_window("main"));
+        if let Some(window) = target {
+            let _ = window.show();
+            let _ = window.set_focus();
+            let _ = window.emit("snip-captured", &payload);
         }
         return Ok(());
     }
@@ -736,6 +791,8 @@ fn run_capture_session(
             mode,
             snip_type,
             delay,
+            origin_label,
+            include_cursor,
         });
     }
 
@@ -755,17 +812,25 @@ async fn start_capture_session(
     mode: String,
     snip_type: String,
     delay: u32,
+    origin_label: Option<String>,
+    include_cursor: Option<bool>,
 ) -> Result<(), String> {
     timing_log("command_entry");
-    // 1. Immediately hide main editor window cleanly
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.hide();
+    let include_cursor = include_cursor.unwrap_or(false);
+
+    // 1. Immediately hide the window that started the capture
+    let origin = origin_label
+        .as_deref()
+        .and_then(|label| app.get_webview_window(label))
+        .or_else(|| app.get_webview_window("main"));
+    if let Some(window) = origin {
+        let _ = window.hide();
     }
 
     // 2. Grab the display and overlay the desktop without blocking the UI thread
     let app_handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        run_capture_session(app_handle, mode, snip_type, delay)
+        run_capture_session(app_handle, mode, snip_type, delay, origin_label, include_cursor)
     })
     .await
     .map_err(|e| format!("Capture task failed: {}", e))?
@@ -825,7 +890,8 @@ fn get_capture_session(state: tauri::State<'_, AppCaptureState>) -> Result<Optio
 }
 
 #[tauri::command]
-fn capture_desktop(app: tauri::AppHandle) -> Result<DesktopCapture, String> {
+fn capture_desktop(app: tauri::AppHandle, include_cursor: Option<bool>) -> Result<DesktopCapture, String> {
+    let include_cursor = include_cursor.unwrap_or(false);
     // 1. Immediately hide main editor window cleanly
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.hide();
@@ -837,7 +903,8 @@ fn capture_desktop(app: tauri::AppHandle) -> Result<DesktopCapture, String> {
 
     // Run screen grab and window detection in parallel across separate threads
     let thread_path = temp_path_str.to_string();
-    let screen_thread = std::thread::spawn(move || execute_screen_grab(&thread_path));
+    let screen_thread =
+        std::thread::spawn(move || execute_screen_grab(&thread_path, include_cursor));
     let win_thread = std::thread::spawn(move || detect_desktop_windows());
 
     let captured = screen_thread.join().unwrap_or(false);
@@ -894,16 +961,106 @@ fn timing_enabled() -> bool {
     std::env::var_os("SNIPLEX_TIMING").is_some()
 }
 
+fn next_capture_token() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{}", millis, count)
+}
+
+/// Opens a standalone editor window and parks its payload until the page asks
+/// for it. The token in the fragment keeps each window's capture isolated.
+fn spawn_capture_window(
+    app: &tauri::AppHandle,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    let token = next_capture_token();
+    app.state::<CaptureWindowStore>()
+        .insert(&token, payload.clone());
+
+    let title = payload
+        .get("title")
+        .and_then(|value| value.as_str())
+        .unwrap_or("Sniplex");
+
+    build_capture_window(app, &token, title)
+        .map(|_| ())
+        .map_err(|err| format!("Failed to open capture window: {}", err))
+}
+
+fn build_capture_window(
+    app: &tauri::AppHandle,
+    token: &str,
+    title: &str,
+) -> tauri::Result<tauri::WebviewWindow> {
+    tauri::WebviewWindowBuilder::new(
+        app,
+        format!("capture-{}", token),
+        WebviewUrl::App(format!("index.html#capture={}", token).into()),
+    )
+    .title(title)
+    .inner_size(1100.0, 720.0)
+    .min_inner_size(700.0, 500.0)
+    .decorations(false)
+    .build()
+}
+
 #[tauri::command]
-fn complete_capture(app: tauri::AppHandle, payload: serde_json::Value) -> Result<(), String> {
+fn open_capture_window(
+    app: tauri::AppHandle,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    spawn_capture_window(&app, payload)
+}
+
+#[tauri::command]
+fn take_capture_payload(
+    store: tauri::State<'_, CaptureWindowStore>,
+    token: String,
+) -> Option<serde_json::Value> {
+    store.take(&token)
+}
+
+#[tauri::command]
+fn complete_capture(
+    app: tauri::AppHandle,
+    payload: serde_json::Value,
+    open_in_new_window: Option<bool>,
+) -> Result<(), String> {
     if let Some(overlay) = app.get_webview_window("overlay") {
         let _ = overlay.hide();
     }
+
+    // The session remembers which editor started the capture, so a second
+    // window (or a capture started while one is open) resolves to its origin.
+    let origin_label = app
+        .state::<AppCaptureState>()
+        .session
+        .lock()
+        .ok()
+        .and_then(|session| session.as_ref().and_then(|s| s.origin_label.clone()));
+
     clear_capture_state(&app);
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.show();
-        let _ = main.set_focus();
-        let _ = main.emit("snip-captured", payload);
+
+    if open_in_new_window.unwrap_or(false) {
+        show_origin(&app, origin_label.as_deref());
+        return spawn_capture_window(&app, payload);
+    }
+
+    let target = origin_label
+        .as_deref()
+        .and_then(|label| app.get_webview_window(label))
+        .or_else(|| app.get_webview_window("main"));
+
+    if let Some(window) = target {
+        let _ = window.show();
+        let _ = window.set_focus();
+        let _ = window.emit("snip-captured", payload);
     }
     Ok(())
 }
@@ -913,11 +1070,16 @@ fn cancel_capture(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(overlay) = app.get_webview_window("overlay") {
         let _ = overlay.hide();
     }
+
+    let origin_label = app
+        .state::<AppCaptureState>()
+        .session
+        .lock()
+        .ok()
+        .and_then(|session| session.as_ref().and_then(|s| s.origin_label.clone()));
+
     clear_capture_state(&app);
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.show();
-        let _ = main.set_focus();
-    }
+    show_origin(&app, origin_label.as_deref());
     Ok(())
 }
 
@@ -1043,16 +1205,109 @@ fn select_folder() -> Result<Option<String>, String> {
     Ok(None)
 }
 
+/// Expands a leading `~` so preferences can store friendly folder paths.
+fn expand_home(path: &str) -> PathBuf {
+    if path == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home);
+        }
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(path)
+}
+
+#[tauri::command]
+fn save_screenshot(folder: String, file_name: String, png_base64: String) -> Result<String, String> {
+    let directory = expand_home(folder.trim());
+    fs::create_dir_all(&directory).map_err(|error| {
+        format!("Failed to create {}: {}", directory.display(), error)
+    })?;
+
+    // File names come from timestamped defaults, but never allow the name to
+    // escape the chosen folder.
+    let clean_name: String = file_name
+        .chars()
+        .filter(|character| *character != '/' && *character != '\\' && !character.is_control())
+        .collect();
+    let clean_name = if clean_name.trim().is_empty() {
+        "Sniplex.png".to_string()
+    } else {
+        clean_name
+    };
+
+    let path = directory.join(clean_name);
+    let bytes = decode_png_base64(&png_base64)?;
+    fs::write(&path, &bytes)
+        .map_err(|error| format!("Failed to write {}: {}", path.display(), error))?;
+
+    Ok(path.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 fn exit_app(app: tauri::AppHandle) {
     app.exit(0);
 }
 
+/// Hands the capture shortcuts to the desktop portal on desktops that do not
+/// take them from the desktop entry. Runs off the UI thread because the portal
+/// may ask the user to confirm the bindings.
+#[tauri::command]
+async fn sync_global_shortcuts(
+    app: tauri::AppHandle,
+    shortcuts: Vec<global_shortcuts::ShortcutSpec>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || global_shortcuts::sync(&app, shortcuts))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+/// Takes the capture another launch handed over, if there is one waiting.
+#[tauri::command]
+fn take_launch_action(state: tauri::State<'_, launcher::LaunchState>) -> Option<String> {
+    state.0.lock().ok().and_then(|mut slot| slot.take())
+}
+
+/// Bindings the desktop currently holds for this entry. `None` means the
+/// desktop keeps its shortcuts elsewhere and the in-app list stays authoritative.
+#[tauri::command]
+async fn list_global_shortcuts() -> Result<Option<Vec<kde_shortcuts::Binding>>, String> {
+    tauri::async_runtime::spawn_blocking(kde_shortcuts::list)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+/// Replaces the complete Sniplex shortcut set on the desktop atomically.
+///
+/// The whole edit is either applied or the desktop is returned to its previous
+/// bindings, so Sniplex never leaves its UI and the desktop in different states.
+#[tauri::command]
+async fn set_global_shortcuts(
+    bindings: Vec<kde_shortcuts::Binding>,
+) -> Result<Vec<kde_shortcuts::Binding>, String> {
+    tauri::async_runtime::spawn_blocking(move || kde_shortcuts::set_all(bindings))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let action = launcher::requested_mode();
+
+    // The desktop entry starts this programme once per shortcut press. When an
+    // instance is already running, the request goes there and no window opens.
+    if launcher::hand_off(&action) {
+        return;
+    }
+
     tauri::Builder::default()
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .manage(launcher::LaunchState::new(action))
         .invoke_handler(tauri::generate_handler![
             select_folder,
+            save_screenshot,
             capture_desktop,
             start_capture_session,
             get_capture_session,
@@ -1062,10 +1317,16 @@ pub fn run() {
             show_capture_overlay,
             complete_capture,
             cancel_capture,
+            open_capture_window,
+            take_capture_payload,
             restore_window,
             get_detected_windows,
             copy_image_to_clipboard,
-            exit_app
+            exit_app,
+            sync_global_shortcuts,
+            take_launch_action,
+            list_global_shortcuts,
+            set_global_shortcuts
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
@@ -1076,7 +1337,9 @@ pub fn run() {
         })
         .setup(|app| {
             app.manage(AppCaptureState::default());
+            app.manage(CaptureWindowStore::default());
             prune_capture_files();
+            launcher::serve(app.handle());
 
             // The interface never zooms. A touchpad pinch belongs to the capture
             // canvas, so WebKitGTK's internal page-zoom gesture is detached and

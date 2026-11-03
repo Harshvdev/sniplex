@@ -197,7 +197,9 @@ export function cropFreeformFromDataUrl(
  * Requests desktop display acquisition and display freeze from the Tauri backend,
  * immediately hiding the Sniplex application window so that desktop contents are clean.
  */
-export async function captureDesktopDisplay(): Promise<{ capture: DesktopCapture; wasMaximized: boolean }> {
+export async function captureDesktopDisplay(
+  includeCursor = false
+): Promise<{ capture: DesktopCapture; wasMaximized: boolean }> {
   let wasMaximized = true;
 
   if (isTauriEnvironment()) {
@@ -210,7 +212,7 @@ export async function captureDesktopDisplay(): Promise<{ capture: DesktopCapture
       await win.hide();
 
       const { invoke } = await import('@tauri-apps/api/core');
-      const capture = await invoke<DesktopCapture>('capture_desktop');
+      const capture = await invoke<DesktopCapture>('capture_desktop', { includeCursor });
       return { capture, wasMaximized };
     } catch (err) {
       console.warn('Native desktop capture error:', err);

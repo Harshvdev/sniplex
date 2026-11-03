@@ -3,6 +3,7 @@
   import { Check, Minus, Plus, X } from '@lucide/svelte';
   import type { ToolType } from '../types';
   import { pixelLinePoints } from '../drawing';
+  import { detectHeldShape, type HeldShape, type StrokePoint } from '../hold-snap';
   import { registerPinchBridge, type PinchPhase } from '../pinch';
   import {
     MAX_ZOOM,
@@ -25,6 +26,7 @@
     activeTool = 'pen',
     penColor = '#0078d4',
     penSize = 3,
+    penOpacity = 100,
     highlighterColor = '#ffeb3b',
     highlighterSize = 18,
     isCropping = false,
@@ -41,6 +43,7 @@
     activeTool: ToolType;
     penColor: string;
     penSize: number;
+    penOpacity: number;
     highlighterColor: string;
     highlighterSize: number;
     isCropping: boolean;
@@ -53,11 +56,19 @@
 
   let viewportEl = $state<HTMLDivElement | null>(null);
   let canvasEl = $state<HTMLCanvasElement | null>(null);
+  let inkEl = $state<HTMLCanvasElement | null>(null);
   let ctx = $state<CanvasRenderingContext2D | null>(null);
+  let inkCtx: CanvasRenderingContext2D | null = null;
   let isDrawing = $state(false);
   let lastX = 0;
   let lastY = 0;
   let didStroke = false;
+
+  // In-progress pen work lives on the overlay canvas so a held stroke can be
+  // replaced by clean geometry before anything is committed to the capture.
+  let strokePoints: StrokePoint[] = [];
+  let strokeSnapped: HeldShape | null = null;
+  let holdTimer: number | null = null;
 
   // Navigation state: Space or the middle mouse button drags the view.
   let pointerInside = $state(false);
@@ -107,6 +118,9 @@
   let panCursor = $derived(spaceHeld);
 
   let imageLoadToken = 0;
+  // Pristine capture kept aside so the eraser can restore the untouched pixels
+  // under the brush instead of leaving transparent holes in the screenshot.
+  let sourceImage: HTMLImageElement | null = null;
 
   onMount(() => {
     canvasWidth = width || 960;
@@ -117,6 +131,7 @@
       ctx = canvasEl.getContext('2d');
       renderCanvas();
     }
+    sizeInkCanvas();
 
     const viewport = viewportEl;
     if (!viewport) return;
@@ -149,6 +164,7 @@
 
         canvasWidth = img.naturalWidth || width || 960;
         canvasHeight = img.naturalHeight || height || 540;
+        sourceImage = img;
         if (canvasEl) {
           const context = ctx || canvasEl.getContext('2d');
           if (context) {
@@ -158,12 +174,14 @@
             context.drawImage(img, 0, 0);
           }
         }
+        sizeInkCanvas();
         onImageReady();
       };
       img.src = url;
     } else {
       canvasWidth = width || 960;
       canvasHeight = height || 540;
+      sourceImage = null;
       if (canvasEl) {
         const context = ctx || canvasEl.getContext('2d');
         if (context) {
@@ -172,9 +190,18 @@
           canvasEl.height = canvasHeight;
         }
       }
+      sizeInkCanvas();
       renderCanvas();
     }
   });
+
+  function sizeInkCanvas() {
+    if (!inkEl) return;
+    inkEl.width = canvasWidth;
+    inkEl.height = canvasHeight;
+    inkCtx = inkEl.getContext('2d');
+    clearInk();
+  }
 
   function renderCanvas() {
     if (!ctx || !canvasEl) return;
@@ -310,20 +337,190 @@
     );
   }
 
-  function paintPixel(x: number, y: number) {
-    if (!ctx) return;
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.fillStyle = penColor;
-    ctx.fillRect(x, y, 1, 1);
+  function penAlpha(): number {
+    const value = Number.isFinite(penOpacity) ? penOpacity : 100;
+    return Math.min(1, Math.max(0.1, value / 100));
   }
 
-  function paintPixelLine(fromX: number, fromY: number, toX: number, toY: number) {
-    if (!ctx) return;
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.fillStyle = penColor;
-    for (const point of pixelLinePoints(fromX, fromY, toX, toY)) {
-      ctx.fillRect(point.x, point.y, 1, 1);
+  function clearInk() {
+    if (inkCtx && inkEl) {
+      inkCtx.clearRect(0, 0, inkEl.width, inkEl.height);
     }
+  }
+
+  function drawPixelDot(target: CanvasRenderingContext2D, x: number, y: number, color: string) {
+    target.fillStyle = color;
+    target.fillRect(Math.floor(x), Math.floor(y), 1, 1);
+  }
+
+  function drawPixelSegment(
+    target: CanvasRenderingContext2D,
+    fromX: number,
+    fromY: number,
+    toX: number,
+    toY: number,
+    color: string
+  ) {
+    target.fillStyle = color;
+    for (const point of pixelLinePoints(fromX, fromY, toX, toY)) {
+      target.fillRect(point.x, point.y, 1, 1);
+    }
+  }
+
+  function drawPixelStroke(
+    target: CanvasRenderingContext2D,
+    points: StrokePoint[],
+    color: string
+  ) {
+    if (points.length === 0) return;
+    if (points.length === 1) {
+      drawPixelDot(target, points[0].x, points[0].y, color);
+      return;
+    }
+    for (let i = 1; i < points.length; i++) {
+      drawPixelSegment(target, points[i - 1].x, points[i - 1].y, points[i].x, points[i].y, color);
+    }
+  }
+
+  /** Draws a rounded, midpoint-smoothed freehand path. */
+  function drawSmoothPath(
+    target: CanvasRenderingContext2D,
+    points: StrokePoint[],
+    color: string,
+    width: number
+  ) {
+    if (points.length === 0) return;
+
+    target.save();
+    target.strokeStyle = color;
+    target.fillStyle = color;
+    target.lineWidth = width;
+    target.lineCap = 'round';
+    target.lineJoin = 'round';
+
+    if (points.length === 1) {
+      target.beginPath();
+      target.arc(points[0].x, points[0].y, width / 2, 0, Math.PI * 2);
+      target.fill();
+      target.restore();
+      return;
+    }
+
+    target.beginPath();
+    target.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length - 1; i++) {
+      const midX = (points[i].x + points[i + 1].x) / 2;
+      const midY = (points[i].y + points[i + 1].y) / 2;
+      target.quadraticCurveTo(points[i].x, points[i].y, midX, midY);
+    }
+    const last = points[points.length - 1];
+    target.lineTo(last.x, last.y);
+    target.stroke();
+    target.restore();
+  }
+
+  function drawHeldShape(
+    target: CanvasRenderingContext2D,
+    shape: HeldShape,
+    color: string,
+    width: number
+  ) {
+    const left = Math.min(shape.x1, shape.x2);
+    const top = Math.min(shape.y1, shape.y2);
+    const right = Math.max(shape.x1, shape.x2);
+    const bottom = Math.max(shape.y1, shape.y2);
+
+    target.save();
+    target.strokeStyle = color;
+    target.lineWidth = width;
+    target.lineCap = 'round';
+    target.lineJoin = 'round';
+
+    if (shape.kind === 'rectangle') {
+      target.strokeRect(left, top, right - left, bottom - top);
+      target.restore();
+      return;
+    }
+
+    if (shape.kind === 'oval') {
+      target.beginPath();
+      target.ellipse(
+        (left + right) / 2,
+        (top + bottom) / 2,
+        Math.max(0.5, (right - left) / 2),
+        Math.max(0.5, (bottom - top) / 2),
+        0,
+        0,
+        Math.PI * 2
+      );
+      target.stroke();
+      target.restore();
+      return;
+    }
+
+    target.beginPath();
+    target.moveTo(shape.x1, shape.y1);
+    target.lineTo(shape.x2, shape.y2);
+    target.stroke();
+
+    if (shape.kind === 'arrow') {
+      const angle = Math.atan2(shape.y2 - shape.y1, shape.x2 - shape.x1);
+      const head = Math.max(12, width * 4);
+      const spread = 0.5;
+      target.beginPath();
+      target.moveTo(shape.x2, shape.y2);
+      target.lineTo(
+        shape.x2 - Math.cos(angle - spread) * head,
+        shape.y2 - Math.sin(angle - spread) * head
+      );
+      target.moveTo(shape.x2, shape.y2);
+      target.lineTo(
+        shape.x2 - Math.cos(angle + spread) * head,
+        shape.y2 - Math.sin(angle + spread) * head
+      );
+      target.stroke();
+    }
+
+    target.restore();
+  }
+
+  function redrawInk() {
+    if (!inkCtx) return;
+    clearInk();
+
+    if (strokeSnapped) {
+      drawHeldShape(inkCtx, strokeSnapped, penColor, Math.max(1, penSize));
+    } else if (usesPixelBrush()) {
+      drawPixelStroke(inkCtx, strokePoints, penColor);
+    } else {
+      drawSmoothPath(inkCtx, strokePoints, penColor, Math.max(1, penSize));
+    }
+  }
+
+  function clearHoldTimer() {
+    if (holdTimer !== null) {
+      clearTimeout(holdTimer);
+      holdTimer = null;
+    }
+  }
+
+  /**
+   * Starts the Draw & Hold window after the pointer stops moving. A recognised
+   * stroke is replaced in place; moving again restores the freehand path.
+   */
+  function scheduleHoldSnap() {
+    clearHoldTimer();
+    holdTimer = window.setTimeout(() => {
+      holdTimer = null;
+      if (!isDrawing || strokeSnapped) return;
+      if (activeTool !== 'pen' && activeTool !== 'touch') return;
+
+      const shape = detectHeldShape(strokePoints);
+      if (!shape) return;
+
+      strokeSnapped = shape;
+      redrawInk();
+    }, 500);
   }
 
   function strokeSegment(
@@ -346,6 +543,45 @@
     ctx.stroke();
   }
 
+  /**
+   * The eraser belongs to the annotations, not the screenshot: it paints the
+   * untouched capture back over everything under the brush, which removes ink
+   * while keeping the original pixels intact.
+   */
+  function eraseSegment(
+    fromX: number,
+    fromY: number,
+    toX: number,
+    toY: number,
+    lineWidth: number
+  ) {
+    if (!ctx) return;
+
+    const radius = Math.max(1, lineWidth / 2);
+    const distance = Math.hypot(toX - fromX, toY - fromY);
+    const steps = Math.max(1, Math.ceil(distance / Math.max(1, radius / 2)));
+
+    ctx.save();
+    ctx.beginPath();
+    for (let step = 0; step <= steps; step += 1) {
+      const progress = step / steps;
+      const x = fromX + (toX - fromX) * progress;
+      const y = fromY + (toY - fromY) * progress;
+      ctx.moveTo(x + radius, y);
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+    }
+    ctx.clip();
+
+    if (sourceImage) {
+      ctx.drawImage(sourceImage, 0, 0, canvasWidth, canvasHeight);
+    } else {
+      // No capture to restore: leave the blank canvas the annotations sat on.
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+    }
+    ctx.restore();
+  }
+
   function startStrokeAt(clientX: number, clientY: number) {
     if (!ctx || !canvasEl || !isMarkupTool()) return;
 
@@ -355,11 +591,13 @@
     lastX = point.x;
     lastY = point.y;
 
-    // A one-pixel pen colors the pixel under the cursor immediately, so a
-    // single click leaves an exact dot instead of a soft antialiased smudge.
-    if (usesPixelBrush()) {
-      paintPixel(Math.floor(point.x), Math.floor(point.y));
+    if (activeTool === 'pen' || activeTool === 'touch') {
+      strokePoints = [{ x: point.x, y: point.y }];
+      strokeSnapped = null;
+      clearInk();
+      redrawInk();
       didStroke = true;
+      scheduleHoldSnap();
     }
   }
 
@@ -369,11 +607,22 @@
     const point = clientToImage(clientX, clientY);
 
     if (activeTool === 'pen' || activeTool === 'touch') {
-      if (usesPixelBrush()) {
-        paintPixelLine(lastX, lastY, point.x, point.y);
+      const wasSnapped = strokeSnapped !== null;
+      strokePoints.push({ x: point.x, y: point.y });
+      didStroke = true;
+
+      if (wasSnapped) {
+        strokeSnapped = null;
+        redrawInk();
+      } else if (usesPixelBrush()) {
+        if (inkCtx) {
+          drawPixelSegment(inkCtx, lastX, lastY, point.x, point.y, penColor);
+        }
       } else {
-        strokeSegment(lastX, lastY, point.x, point.y, penColor, penSize, 'round');
+        redrawInk();
       }
+
+      scheduleHoldSnap();
     } else if (activeTool === 'highlighter') {
       ctx.globalCompositeOperation = 'multiply';
       strokeSegment(
@@ -386,23 +635,41 @@
         'square'
       );
       ctx.globalCompositeOperation = 'source-over';
+      didStroke = true;
     } else if (activeTool === 'eraser') {
-      ctx.globalCompositeOperation = 'destination-out';
-      strokeSegment(lastX, lastY, point.x, point.y, '#000000', 20, 'round');
-      ctx.globalCompositeOperation = 'source-over';
+      eraseSegment(lastX, lastY, point.x, point.y, 20);
+      didStroke = true;
     }
 
-    didStroke = true;
     lastX = point.x;
     lastY = point.y;
   }
 
   function finishStroke() {
-    if (isDrawing && didStroke) {
+    clearHoldTimer();
+    const isPenStroke = activeTool === 'pen' || activeTool === 'touch';
+
+    if (isDrawing && isPenStroke && inkEl && ctx && strokePoints.length > 0) {
+      if (strokeSnapped) redrawInk();
+
+      // The whole stroke is composited once, so a translucent pen never builds
+      // up darker patches where the path crosses itself.
+      ctx.save();
+      ctx.globalAlpha = penAlpha();
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.drawImage(inkEl, 0, 0);
+      ctx.restore();
+      clearInk();
+
+      if (didStroke) onCanvasMutated();
+    } else if (isDrawing && didStroke) {
       onCanvasMutated();
     }
+
     isDrawing = false;
     didStroke = false;
+    strokePoints = [];
+    strokeSnapped = null;
   }
 
   function startPan(clientX: number, clientY: number, pointerId: number) {
@@ -788,6 +1055,14 @@
           ? 'cursor-grabbing'
           : 'cursor-grab'
         : 'cursor-crosshair'}"
+      style="width: {displayWidth}px; height: {displayHeight}px; image-rendering: {imageRendering};"
+    ></canvas>
+
+    <!-- In-progress pen preview: committed to the capture when the stroke ends -->
+    <canvas
+      bind:this={inkEl}
+      aria-hidden="true"
+      class="absolute inset-0 block pointer-events-none"
       style="width: {displayWidth}px; height: {displayHeight}px; image-rendering: {imageRendering};"
     ></canvas>
 

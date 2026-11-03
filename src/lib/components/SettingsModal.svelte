@@ -1,7 +1,7 @@
 <script lang="ts">
   import { ArrowLeft, RotateCcw } from '@lucide/svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import type { AppTheme } from '../types';
+  import { settings, updateSettings, persistSettings } from '../settings.svelte';
   import {
     loadShortcuts,
     saveShortcuts,
@@ -12,62 +12,56 @@
   } from '../shortcuts';
 
   let {
-    theme = 'dark',
-    autoCopy = true,
     onClose = () => {},
-    onThemeChange = (t: AppTheme) => {},
-    onAutoCopyChange = (value: boolean) => {},
-    onShortcutsChange = (s: ShortcutItem[]) => {},
+    onShortcutsChange = (
+      _s: ShortcutItem[],
+      _changedId: string
+    ): Promise<string | null> | void => {},
   }: {
-    theme: AppTheme;
-    autoCopy: boolean;
     onClose: () => void;
-    onThemeChange: (t: AppTheme) => void;
-    onAutoCopyChange?: (value: boolean) => void;
-    onShortcutsChange?: (s: ShortcutItem[]) => void;
+    onShortcutsChange?: (
+      shortcuts: ShortcutItem[],
+      changedId: string
+    ) => Promise<string | null> | void;
   } = $props();
 
-  // Settings reactive state
-  let autoSave = $state(true);
-  let askToSave = $state(true);
-  let multipleInstances = $state(false);
-  let addOutline = $state(false);
-  let outlineColor = $state('#d13438');
-  let outlineWidth = $state(2);
-  let prtScnShortcut = $state(true);
-  let recordMic = $state(false);
-  let recordSystemAudio = $state(true);
+  // Folder editors are transient UI state; the folder itself is persisted.
+  let editingScreenshotFolder = $state(false);
+  let screenshotDraft = $state('');
+  let editingRecordingFolder = $state(false);
+  let recordingDraft = $state('');
 
-  // Screenshots save directory state
-  let saveFolder = $state<string>(
-    (typeof localStorage !== 'undefined' && localStorage.getItem('sniplex_save_folder')) || '~/Pictures/Screenshots'
-  );
-  let isEditingFolder = $state(false);
-  let tempFolder = $state('');
-
-  async function handlePickFolder() {
+  async function pickFolder(kind: 'screenshot' | 'recording') {
     try {
       const selected = await invoke<string | null>('select_folder');
       if (selected) {
-        saveFolder = selected;
-        tempFolder = selected;
-        if (typeof localStorage !== 'undefined') {
-          localStorage.setItem('sniplex_save_folder', selected);
+        if (kind === 'screenshot') {
+          updateSettings({ screenshotFolder: selected });
+        } else {
+          updateSettings({ recordingFolder: selected });
         }
       }
     } catch {
-      isEditingFolder = true;
+      if (kind === 'screenshot') {
+        screenshotDraft = settings.screenshotFolder;
+        editingScreenshotFolder = true;
+      } else {
+        recordingDraft = settings.recordingFolder;
+        editingRecordingFolder = true;
+      }
     }
   }
 
-  function handleSaveCustomFolder() {
-    if (tempFolder.trim()) {
-      saveFolder = tempFolder.trim();
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem('sniplex_save_folder', saveFolder);
-      }
+  function commitFolder(kind: 'screenshot' | 'recording') {
+    if (kind === 'screenshot') {
+      const value = screenshotDraft.trim();
+      if (value) updateSettings({ screenshotFolder: value });
+      editingScreenshotFolder = false;
+    } else {
+      const value = recordingDraft.trim();
+      if (value) updateSettings({ recordingFolder: value });
+      editingRecordingFolder = false;
     }
-    isEditingFolder = false;
   }
 
   // Customizable shortcuts reactive state
@@ -75,6 +69,9 @@
   let recordingId = $state<string | null>(null);
   let tempModifiers = $state<string[]>([]);
   let shortcutError = $state<string | null>(null);
+  // Which row keeps showing the message after recording has stopped. A refused
+  // binding has to stay visible on the row it belongs to.
+  let shortcutErrorId = $state<string | null>(null);
 
   let hasCustomShortcuts = $derived(
     shortcuts.some((s) => !areKeysEqual(s.keys, s.defaultKeys))
@@ -84,15 +81,40 @@
     recordingId = id;
     tempModifiers = [];
     shortcutError = null;
+    shortcutErrorId = null;
   }
 
   function cancelRecording() {
     recordingId = null;
     tempModifiers = [];
     shortcutError = null;
+    shortcutErrorId = null;
   }
 
-  function handleRecordKey(e: KeyboardEvent) {
+  /**
+   * Applies an edit and reports what the desktop said about it. A refused
+   * binding — most often a key another application already holds — rolls the
+   * list back, so it never shows a shortcut the desktop is not listening for.
+   */
+  async function commitShortcut(
+    next: ShortcutItem[],
+    previous: ShortcutItem[],
+    changedId: string
+  ) {
+    shortcuts = next;
+    saveShortcuts(next);
+
+    const error = (await onShortcutsChange(next, changedId)) ?? null;
+    shortcutError = error;
+    shortcutErrorId = error ? changedId : null;
+
+    if (error) {
+      shortcuts = previous;
+      saveShortcuts(previous);
+    }
+  }
+
+  async function handleRecordKey(e: KeyboardEvent) {
     if (!recordingId) return;
 
     e.preventDefault();
@@ -116,10 +138,12 @@
       return;
     }
 
+    const changedId = recordingId;
+    const previous = shortcuts;
     const newKeys = [...modifiers, primaryKey];
 
-    shortcuts = shortcuts.map((s) => {
-      if (s.id === recordingId) {
+    const next = shortcuts.map((s) => {
+      if (s.id === changedId) {
         return { ...s, keys: newKeys };
       }
       if (areKeysEqual(s.keys, newKeys)) {
@@ -128,34 +152,32 @@
       return s;
     });
 
-    saveShortcuts(shortcuts);
-    onShortcutsChange(shortcuts);
     recordingId = null;
     tempModifiers = [];
     shortcutError = null;
+    await commitShortcut(next, previous, changedId);
   }
 
-  function resetShortcut(id: string) {
-    shortcuts = shortcuts.map((s) => {
+  async function resetShortcut(id: string) {
+    const previous = shortcuts;
+    const next = shortcuts.map((s) => {
       if (s.id === id) {
         return { ...s, keys: [...s.defaultKeys] };
       }
       return s;
     });
-    saveShortcuts(shortcuts);
-    onShortcutsChange(shortcuts);
+    await commitShortcut(next, previous, id);
   }
 
-  function resetAllShortcuts() {
-    shortcuts = DEFAULT_SHORTCUTS.map((s) => ({
+  async function resetAllShortcuts() {
+    const previous = shortcuts;
+    const next = DEFAULT_SHORTCUTS.map((s) => ({
       ...s,
       keys: [...s.defaultKeys],
       defaultKeys: [...s.defaultKeys],
     }));
-    saveShortcuts(shortcuts);
-    onShortcutsChange(shortcuts);
-    shortcutError = null;
     recordingId = null;
+    await commitShortcut(next, previous, 'all');
   }
 
   const presetColors = [
@@ -201,8 +223,8 @@
           <!-- Light Theme -->
           <button
             type="button"
-            class="flex items-center justify-between px-3.5 py-2.5 rounded-md border text-left transition-colors cursor-pointer outline-none focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0 {theme === 'light' ? 'border-neutral-900 dark:border-white bg-neutral-100 dark:bg-neutral-800' : 'border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5'}"
-            onclick={() => onThemeChange('light')}
+            class="flex items-center justify-between px-3.5 py-2.5 rounded-md border text-left transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0067c0] dark:focus-visible:ring-[#60cdff] focus-visible:ring-offset-2 {settings.theme === 'light' ? 'border-neutral-900 dark:border-white bg-neutral-100 dark:bg-neutral-800' : 'border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5'}"
+            onclick={() => updateSettings({ theme: 'light' })}
           >
             <div class="flex items-center gap-2.5">
               <svg class="w-4 h-4 shrink-0 drop-shadow-2xs" viewBox="0 0 16 16" fill="none">
@@ -211,7 +233,7 @@
               <span class="text-xs font-medium text-neutral-800 dark:text-neutral-200">Light</span>
             </div>
 
-            {#if theme === 'light'}
+            {#if settings.theme === 'light'}
               <svg class="w-4 h-4 text-neutral-900 dark:text-white" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="3.5 8.5 6.5 11.5 12.5 4.5" />
               </svg>
@@ -221,8 +243,8 @@
           <!-- Dark Theme -->
           <button
             type="button"
-            class="flex items-center justify-between px-3.5 py-2.5 rounded-md border text-left transition-colors cursor-pointer outline-none focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0 {theme === 'dark' ? 'border-neutral-900 dark:border-white bg-neutral-100 dark:bg-neutral-800' : 'border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5'}"
-            onclick={() => onThemeChange('dark')}
+            class="flex items-center justify-between px-3.5 py-2.5 rounded-md border text-left transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0067c0] dark:focus-visible:ring-[#60cdff] focus-visible:ring-offset-2 {settings.theme === 'dark' ? 'border-neutral-900 dark:border-white bg-neutral-100 dark:bg-neutral-800' : 'border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5'}"
+            onclick={() => updateSettings({ theme: 'dark' })}
           >
             <div class="flex items-center gap-2.5">
               <svg class="w-4 h-4 shrink-0 drop-shadow-2xs" viewBox="0 0 16 16" fill="none">
@@ -231,7 +253,7 @@
               <span class="text-xs font-medium text-neutral-800 dark:text-neutral-200">Dark</span>
             </div>
 
-            {#if theme === 'dark'}
+            {#if settings.theme === 'dark'}
               <svg class="w-4 h-4 text-neutral-900 dark:text-white" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="3.5 8.5 6.5 11.5 12.5 4.5" />
               </svg>
@@ -241,8 +263,8 @@
           <!-- System Theme -->
           <button
             type="button"
-            class="flex items-center justify-between px-3.5 py-2.5 rounded-md border text-left transition-colors cursor-pointer outline-none focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0 {theme === 'system' ? 'border-neutral-900 dark:border-white bg-neutral-100 dark:bg-neutral-800' : 'border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5'}"
-            onclick={() => onThemeChange('system')}
+            class="flex items-center justify-between px-3.5 py-2.5 rounded-md border text-left transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0067c0] dark:focus-visible:ring-[#60cdff] focus-visible:ring-offset-2 {settings.theme === 'system' ? 'border-neutral-900 dark:border-white bg-neutral-100 dark:bg-neutral-800' : 'border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5'}"
+            onclick={() => updateSettings({ theme: 'system' })}
           >
             <div class="flex items-center gap-2.5">
               <svg class="w-4 h-4 shrink-0 drop-shadow-2xs" viewBox="0 0 16 16" fill="none">
@@ -254,7 +276,7 @@
               <span class="text-xs font-medium text-neutral-800 dark:text-neutral-200">System</span>
             </div>
 
-            {#if theme === 'system'}
+            {#if settings.theme === 'system'}
               <svg class="w-4 h-4 text-neutral-900 dark:text-white" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="3.5 8.5 6.5 11.5 12.5 4.5" />
               </svg>
@@ -271,6 +293,27 @@
       </div>
 
       <div class="bg-white dark:bg-[#1c1c1c] rounded-lg border border-black/10 dark:border-white/10 shadow-xs divide-y divide-black/5 dark:divide-white/5 overflow-hidden">
+        <!-- Include cursor -->
+        <div class="flex items-center justify-between p-4 gap-4">
+          <div>
+            <div class="text-[13px] font-medium text-neutral-900 dark:text-neutral-100">Include mouse pointer</div>
+            <div class="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5">Draw the visible cursor into captures and recordings</div>
+          </div>
+
+          <button
+            type="button"
+            role="switch"
+            aria-checked={settings.includeCursor}
+            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {settings.includeCursor ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
+            onclick={() => updateSettings({ includeCursor: !settings.includeCursor })}
+            title="Toggle cursor inclusion"
+          >
+            <span
+              class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {settings.includeCursor ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
+            ></span>
+          </button>
+        </div>
+
         <!-- Automatically copy changes -->
         <div class="flex items-center justify-between p-4 gap-4">
           <div>
@@ -281,13 +324,13 @@
           <button
             type="button"
             role="switch"
-            aria-checked={autoCopy}
-            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {autoCopy ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
-            onclick={() => onAutoCopyChange(!autoCopy)}
+            aria-checked={settings.autoCopy}
+            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {settings.autoCopy ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
+            onclick={() => updateSettings({ autoCopy: !settings.autoCopy })}
             title="Toggle automatic copy"
           >
             <span
-              class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {autoCopy ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
+              class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {settings.autoCopy ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
             ></span>
           </button>
         </div>
@@ -303,59 +346,133 @@
             <button
               type="button"
               role="switch"
-              aria-checked={autoSave}
-              class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {autoSave ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
-              onclick={() => autoSave = !autoSave}
+              aria-checked={settings.autoSaveScreenshots}
+              class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {settings.autoSaveScreenshots ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
+              onclick={() => updateSettings({ autoSaveScreenshots: !settings.autoSaveScreenshots })}
               title="Toggle automatic save"
             >
               <span
-                class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {autoSave ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
+                class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {settings.autoSaveScreenshots ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
               ></span>
             </button>
           </div>
 
-          {#if autoSave}
+          {#if settings.autoSaveScreenshots}
             <div class="mt-3 pt-3 border-t border-black/5 dark:border-white/5 text-xs">
-              {#if isEditingFolder}
+              {#if editingScreenshotFolder}
                 <div class="flex items-center gap-2">
                   <input
                     type="text"
-                    bind:value={tempFolder}
+                    bind:value={screenshotDraft}
                     class="flex-1 px-2.5 py-1 text-xs rounded bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 text-neutral-800 dark:text-neutral-100 font-mono focus:outline-none focus:ring-1 focus:ring-[#0067c0]"
                     placeholder="e.g. ~/Pictures/Screenshots"
                   />
                   <button
                     type="button"
                     class="px-2.5 py-1 rounded bg-[#0067c0] text-white font-medium hover:bg-[#005ea6] transition-colors cursor-pointer"
-                    onclick={handleSaveCustomFolder}
+                    onclick={() => commitFolder('screenshot')}
                   >
                     Save
                   </button>
                   <button
                     type="button"
                     class="px-2 py-1 rounded hover:bg-black/5 dark:hover:bg-white/10 text-neutral-600 dark:text-neutral-400 transition-colors cursor-pointer"
-                    onclick={() => { isEditingFolder = false; tempFolder = saveFolder; }}
+                    onclick={() => (editingScreenshotFolder = false)}
                   >
                     Cancel
                   </button>
                 </div>
               {:else}
                 <div class="flex items-center justify-between">
-                  <span class="text-neutral-500 dark:text-neutral-400 font-mono truncate max-w-[280px]" title={saveFolder}>
-                    {saveFolder}
+                  <span class="text-neutral-500 dark:text-neutral-400 font-mono truncate max-w-[280px]" title={settings.screenshotFolder}>
+                    {settings.screenshotFolder}
                   </span>
                   <div class="flex items-center gap-2">
                     <button
                       type="button"
                       class="px-2.5 py-1 rounded hover:bg-black/5 dark:hover:bg-white/10 text-neutral-700 dark:text-neutral-300 font-medium transition-colors border border-black/10 dark:border-white/10 cursor-pointer"
-                      onclick={handlePickFolder}
+                      onclick={() => pickFolder('screenshot')}
                     >
                       Browse...
                     </button>
                     <button
                       type="button"
                       class="px-2.5 py-1 rounded hover:bg-black/5 dark:hover:bg-white/10 text-neutral-700 dark:text-neutral-300 font-medium transition-colors border border-black/10 dark:border-white/10 cursor-pointer"
-                      onclick={() => { isEditingFolder = true; tempFolder = saveFolder; }}
+                      onclick={() => { screenshotDraft = settings.screenshotFolder; editingScreenshotFolder = true; }}
+                    >
+                      Edit
+                    </button>
+                  </div>
+                </div>
+              {/if}
+            </div>
+          {/if}
+        </div>
+
+        <!-- Automatically save screen recordings -->
+        <div class="p-4">
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <div class="text-[13px] font-medium text-neutral-900 dark:text-neutral-100">Automatically save screen recordings</div>
+              <div class="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5">Save finished recordings to Videos/Screen Recordings</div>
+            </div>
+
+            <button
+              type="button"
+              role="switch"
+              aria-checked={settings.autoSaveRecordings}
+              class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {settings.autoSaveRecordings ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
+              onclick={() => updateSettings({ autoSaveRecordings: !settings.autoSaveRecordings })}
+              title="Toggle automatic recording save"
+            >
+              <span
+                class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {settings.autoSaveRecordings ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
+              ></span>
+            </button>
+          </div>
+
+          {#if settings.autoSaveRecordings}
+            <div class="mt-3 pt-3 border-t border-black/5 dark:border-white/5 text-xs">
+              {#if editingRecordingFolder}
+                <div class="flex items-center gap-2">
+                  <input
+                    type="text"
+                    bind:value={recordingDraft}
+                    class="flex-1 px-2.5 py-1 text-xs rounded bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 text-neutral-800 dark:text-neutral-100 font-mono focus:outline-none focus:ring-1 focus:ring-[#0067c0]"
+                    placeholder="e.g. ~/Videos/Screen Recordings"
+                  />
+                  <button
+                    type="button"
+                    class="px-2.5 py-1 rounded bg-[#0067c0] text-white font-medium hover:bg-[#005ea6] transition-colors cursor-pointer"
+                    onclick={() => commitFolder('recording')}
+                  >
+                    Save
+                  </button>
+                  <button
+                    type="button"
+                    class="px-2 py-1 rounded hover:bg-black/5 dark:hover:bg-white/10 text-neutral-600 dark:text-neutral-400 transition-colors cursor-pointer"
+                    onclick={() => (editingRecordingFolder = false)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              {:else}
+                <div class="flex items-center justify-between">
+                  <span class="text-neutral-500 dark:text-neutral-400 font-mono truncate max-w-[280px]" title={settings.recordingFolder}>
+                    {settings.recordingFolder}
+                  </span>
+                  <div class="flex items-center gap-2">
+                    <button
+                      type="button"
+                      class="px-2.5 py-1 rounded hover:bg-black/5 dark:hover:bg-white/10 text-neutral-700 dark:text-neutral-300 font-medium transition-colors border border-black/10 dark:border-white/10 cursor-pointer"
+                      onclick={() => pickFolder('recording')}
+                    >
+                      Browse...
+                    </button>
+                    <button
+                      type="button"
+                      class="px-2.5 py-1 rounded hover:bg-black/5 dark:hover:bg-white/10 text-neutral-700 dark:text-neutral-300 font-medium transition-colors border border-black/10 dark:border-white/10 cursor-pointer"
+                      onclick={() => { recordingDraft = settings.recordingFolder; editingRecordingFolder = true; }}
                     >
                       Edit
                     </button>
@@ -376,13 +493,13 @@
           <button
             type="button"
             role="switch"
-            aria-checked={askToSave}
-            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {askToSave ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
-            onclick={() => askToSave = !askToSave}
+            aria-checked={settings.askToSave}
+            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {settings.askToSave ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
+            onclick={() => updateSettings({ askToSave: !settings.askToSave })}
             title="Toggle confirmation prompt"
           >
             <span
-              class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {askToSave ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
+              class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {settings.askToSave ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
             ></span>
           </button>
         </div>
@@ -397,13 +514,13 @@
           <button
             type="button"
             role="switch"
-            aria-checked={multipleInstances}
-            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {multipleInstances ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
-            onclick={() => multipleInstances = !multipleInstances}
+            aria-checked={settings.multipleInstances}
+            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {settings.multipleInstances ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
+            onclick={() => updateSettings({ multipleInstances: !settings.multipleInstances })}
             title="Toggle multiple instances"
           >
             <span
-              class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {multipleInstances ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
+              class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {settings.multipleInstances ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
             ></span>
           </button>
         </div>
@@ -419,19 +536,19 @@
             <button
               type="button"
               role="switch"
-              aria-checked={addOutline}
-              class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {addOutline ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
-              onclick={() => addOutline = !addOutline}
+              aria-checked={settings.outlineEnabled}
+              class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {settings.outlineEnabled ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
+              onclick={() => updateSettings({ outlineEnabled: !settings.outlineEnabled })}
               title="Toggle snip outline"
             >
               <span
-                class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {addOutline ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
+                class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {settings.outlineEnabled ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
               ></span>
             </button>
           </div>
 
           <!-- Border Customization -->
-          {#if addOutline}
+          {#if settings.outlineEnabled}
             <div class="mt-4 pt-3.5 border-t border-black/5 dark:border-white/5 flex flex-col gap-3">
               <!-- Color Selector -->
               <div class="flex items-center gap-3">
@@ -440,9 +557,9 @@
                   {#each presetColors as preset}
                     <button
                       type="button"
-                      class="w-5 h-5 rounded-full border transition-transform hover:scale-110 cursor-pointer {outlineColor === preset.hex ? 'ring-2 ring-offset-1 ring-neutral-900 dark:ring-white dark:ring-offset-[#1c1c1c] scale-110' : 'border-black/20 dark:border-white/20'}"
+                      class="w-5 h-5 rounded-full border transition-transform hover:scale-110 cursor-pointer {settings.outlineColor === preset.hex ? 'ring-2 ring-offset-1 ring-neutral-900 dark:ring-white dark:ring-offset-[#1c1c1c] scale-110' : 'border-black/20 dark:border-white/20'}"
                       style="background-color: {preset.hex};"
-                      onclick={() => outlineColor = preset.hex}
+                      onclick={() => updateSettings({ outlineColor: preset.hex })}
                       title={preset.name}
                     >
                     </button>
@@ -450,11 +567,13 @@
                   <div class="relative w-5 h-5 rounded-full overflow-hidden border border-black/20 dark:border-white/20 cursor-pointer ml-1">
                     <input
                       type="color"
-                      bind:value={outlineColor}
+                      value={settings.outlineColor}
+                      oninput={(e) => (settings.outlineColor = (e.currentTarget as HTMLInputElement).value)}
+                      onchange={persistSettings}
                       class="absolute -inset-2 w-10 h-10 cursor-pointer opacity-0"
                       title="Custom color"
                     />
-                    <div class="w-full h-full" style="background-color: {outlineColor};"></div>
+                    <div class="w-full h-full" style="background-color: {settings.outlineColor};"></div>
                   </div>
                 </div>
               </div>
@@ -466,12 +585,12 @@
                   type="range"
                   min="1"
                   max="10"
-                  bind:value={outlineWidth}
+                  value={settings.outlineWidth} oninput={(e) => updateSettings({ outlineWidth: Number((e.currentTarget as HTMLInputElement).value) })}
                   class="flex-1 accent-neutral-900 dark:accent-white cursor-pointer"
                 />
-                <span class="text-xs font-mono font-medium w-8 text-right text-neutral-700 dark:text-neutral-300">{outlineWidth}px</span>
+                <span class="text-xs font-mono font-medium w-8 text-right text-neutral-700 dark:text-neutral-300">{settings.outlineWidth}px</span>
 
-                <div class="w-10 h-6 bg-neutral-100 dark:bg-neutral-800 rounded-xs flex items-center justify-center" style="border: {outlineWidth}px solid {outlineColor};">
+                <div class="w-10 h-6 bg-neutral-100 dark:bg-neutral-800 rounded-xs flex items-center justify-center" style="border: {settings.outlineWidth}px solid {settings.outlineColor};">
                   <span class="text-[9px] text-neutral-400">Snip</span>
                 </div>
               </div>
@@ -481,7 +600,36 @@
       </div>
     </div>
 
-    <!-- 3. SHORTCUTS -->
+    <!-- 3. ACCESSIBILITY & ASSISTANCE -->
+    <div class="mb-5">
+      <div class="text-xs font-semibold uppercase tracking-wider text-neutral-500 dark:text-neutral-400 mb-2 px-1">
+        Accessibility &amp; assistance
+      </div>
+
+      <div class="bg-white dark:bg-[#1c1c1c] rounded-lg border border-black/10 dark:border-white/10 shadow-xs divide-y divide-black/5 dark:divide-white/5 overflow-hidden">
+        <div class="flex items-center justify-between p-4 gap-4">
+          <div>
+            <div class="text-[13px] font-medium text-neutral-900 dark:text-neutral-100">Screen reader announcements</div>
+            <div class="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5">Announce captures, copies, and tool changes to the system screen reader</div>
+          </div>
+
+          <button
+            type="button"
+            role="switch"
+            aria-checked={settings.announcements}
+            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {settings.announcements ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
+            onclick={() => updateSettings({ announcements: !settings.announcements })}
+            title="Toggle screen reader announcements"
+          >
+            <span
+              class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {settings.announcements ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
+            ></span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4. SHORTCUTS -->
     <div class="mb-5">
       <div class="flex items-center justify-between mb-2 px-1">
         <div class="text-xs font-semibold uppercase tracking-wider text-neutral-500 dark:text-neutral-400">
@@ -509,13 +657,13 @@
           <button
             type="button"
             role="switch"
-            aria-checked={prtScnShortcut}
-            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {prtScnShortcut ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
-            onclick={() => prtScnShortcut = !prtScnShortcut}
+            aria-checked={settings.printScreenShortcut}
+            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {settings.printScreenShortcut ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
+            onclick={() => updateSettings({ printScreenShortcut: !settings.printScreenShortcut })}
             title="Toggle Print Screen shortcut"
           >
             <span
-              class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {prtScnShortcut ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
+              class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {settings.printScreenShortcut ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
             ></span>
           </button>
         </div>
@@ -596,7 +744,7 @@
               </div>
             </div>
 
-            {#if recordingId === sc.id}
+            {#if recordingId === sc.id || shortcutErrorId === sc.id}
               <div class="mt-2 text-[11px] flex items-center justify-between {shortcutError ? 'text-neutral-900 dark:text-white font-medium' : 'text-neutral-500 dark:text-neutral-400'}">
                 <span>{shortcutError || 'Press key combination on your keyboard (Esc to cancel)'}</span>
               </div>
@@ -606,7 +754,7 @@
       </div>
     </div>
 
-    <!-- 4. SCREEN RECORDING -->
+    <!-- 5. SCREEN RECORDING -->
     <div class="mb-5">
       <div class="text-xs font-semibold uppercase tracking-wider text-neutral-500 dark:text-neutral-400 mb-2 px-1">
         Screen recording
@@ -623,13 +771,13 @@
           <button
             type="button"
             role="switch"
-            aria-checked={recordMic}
-            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {recordMic ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
-            onclick={() => recordMic = !recordMic}
+            aria-checked={settings.recordMicrophone}
+            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {settings.recordMicrophone ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
+            onclick={() => updateSettings({ recordMicrophone: !settings.recordMicrophone })}
             title="Toggle microphone recording"
           >
             <span
-              class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {recordMic ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
+              class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {settings.recordMicrophone ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
             ></span>
           </button>
         </div>
@@ -644,13 +792,13 @@
           <button
             type="button"
             role="switch"
-            aria-checked={recordSystemAudio}
-            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {recordSystemAudio ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
-            onclick={() => recordSystemAudio = !recordSystemAudio}
+            aria-checked={settings.recordSystemAudio}
+            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {settings.recordSystemAudio ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
+            onclick={() => updateSettings({ recordSystemAudio: !settings.recordSystemAudio })}
             title="Toggle system audio recording"
           >
             <span
-              class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {recordSystemAudio ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
+              class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {settings.recordSystemAudio ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
             ></span>
           </button>
         </div>

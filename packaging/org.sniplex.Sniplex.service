@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=org.sniplex.Sniplex
+Exec=/usr/bin/sniplex

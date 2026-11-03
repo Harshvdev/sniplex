@@ -39,6 +39,16 @@
 
   async function handleClose() {
     try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      const current = getCurrentWindow();
+
+      // Dedicated capture windows close on their own; only the primary window
+      // ends the application.
+      if (current.label !== 'main') {
+        await current.close();
+        return;
+      }
+
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('exit_app');
     } catch {

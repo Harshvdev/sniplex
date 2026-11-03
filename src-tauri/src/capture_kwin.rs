@@ -33,12 +33,12 @@ pub fn is_disabled() -> bool {
     DISABLED.load(Ordering::Relaxed)
 }
 
-pub fn capture_workspace() -> Result<RawFrame, CaptureError> {
+pub fn capture_workspace(include_cursor: bool) -> Result<RawFrame, CaptureError> {
     if is_disabled() {
         return Err(CaptureError::Unauthorized);
     }
 
-    match capture_inner() {
+    match capture_inner(include_cursor) {
         Ok(frame) => Ok(frame),
         Err(CaptureError::Unauthorized) => {
             DISABLED.store(true, Ordering::Relaxed);
@@ -48,12 +48,12 @@ pub fn capture_workspace() -> Result<RawFrame, CaptureError> {
     }
 }
 
-fn capture_inner() -> Result<RawFrame, CaptureError> {
+fn capture_inner(include_cursor: bool) -> Result<RawFrame, CaptureError> {
     let connection = Connection::session().map_err(|_| CaptureError::Unavailable)?;
     let (reader, writer) = std::io::pipe().map_err(|_| CaptureError::Unavailable)?;
 
     let mut options: HashMap<String, Value<'_>> = HashMap::new();
-    options.insert("include-cursor".to_string(), Value::from(false));
+    options.insert("include-cursor".to_string(), Value::from(include_cursor));
     options.insert("native-resolution".to_string(), Value::from(true));
 
     let reply = connection.call_method(

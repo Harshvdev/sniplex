@@ -2,13 +2,17 @@
   let {
     color = '#000000',
     size = 4,
+    opacity = 100,
     onColorChange = (c: string) => {},
     onSizeChange = (s: number) => {},
+    onOpacityChange = (o: number) => {},
   }: {
     color: string;
     size: number;
+    opacity: number;
     onColorChange: (c: string) => void;
     onSizeChange: (s: number) => void;
+    onOpacityChange: (o: number) => void;
   } = $props();
 
   const colors = [
@@ -57,8 +61,33 @@
     >
       <div
         class="rounded-full"
-        style="width: {Math.max(2, size / 2)}px; height: {Math.max(2, size / 2)}px; background-color: {color};"
+        style="width: {Math.max(2, size / 2)}px; height: {Math.max(2, size / 2)}px; background-color: {color}; opacity: {opacity / 100};"
       ></div>
+    </div>
+  </div>
+
+  <div class="mt-3 pt-3 border-t border-black/[0.06] dark:border-white/[0.08]">
+    <div class="text-[12px] font-medium text-neutral-500 dark:text-neutral-400 mb-1 flex items-center justify-between">
+      <span>Opacity</span>
+      <span class="font-mono text-neutral-700 dark:text-neutral-200">{opacity}%</span>
+    </div>
+    <div class="flex items-center gap-3">
+      <input
+        type="range"
+        min="10"
+        max="100"
+        step="1"
+        value={opacity}
+        oninput={(e) => onOpacityChange(Number((e.target as HTMLInputElement).value))}
+        class="flex-1 accent-[#0067c0] h-1.5 bg-neutral-200 dark:bg-neutral-700 rounded-lg cursor-pointer"
+        aria-label="Pen opacity"
+      />
+      <div class="w-6 h-6 rounded-full border border-black/10 dark:border-white/10 flex items-center justify-center bg-[linear-gradient(45deg,#d4d4d4_25%,transparent_25%,transparent_75%,#d4d4d4_75%),linear-gradient(45deg,#d4d4d4_25%,transparent_25%,transparent_75%,#d4d4d4_75%)] bg-[length:6px_6px] bg-[position:0_0,3px_3px]">
+        <div
+          class="w-4 h-4 rounded-full"
+          style="background-color: {color}; opacity: {opacity / 100};"
+        ></div>
+      </div>
     </div>
   </div>
 </div>

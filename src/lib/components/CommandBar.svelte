@@ -39,6 +39,7 @@
     activeTool = 'pen',
     penColor = '#0078d4',
     penSize = 3,
+    penOpacity = 100,
     highlighterColor = '#ffeb3b',
     highlighterSize = 18,
     shapeKind = 'rectangle',
@@ -52,6 +53,7 @@
     onToolChange = (t: ToolType) => {},
     onPenColorChange = (c: string) => {},
     onPenSizeChange = (s: number) => {},
+    onPenOpacityChange = (o: number) => {},
     onHighlighterColorChange = (c: string) => {},
     onHighlighterSizeChange = (s: number) => {},
     onShapeKindChange = (s: ShapeKind) => {},
@@ -72,6 +74,7 @@
     activeTool: ToolType;
     penColor: string;
     penSize: number;
+    penOpacity: number;
     highlighterColor: string;
     highlighterSize: number;
     shapeKind: ShapeKind;
@@ -85,6 +88,7 @@
     onToolChange: (t: ToolType) => void;
     onPenColorChange: (c: string) => void;
     onPenSizeChange: (s: number) => void;
+    onPenOpacityChange: (o: number) => void;
     onHighlighterColorChange: (c: string) => void;
     onHighlighterSizeChange: (s: number) => void;
     onShapeKindChange: (s: ShapeKind) => void;
@@ -299,8 +303,10 @@
             <PenFlyout
               color={penColor}
               size={penSize}
+              opacity={penOpacity}
               onColorChange={(c) => { onPenColorChange(c); }}
               onSizeChange={(s) => { onPenSizeChange(s); }}
+              onOpacityChange={(o) => { onPenOpacityChange(o); }}
             />
           </div>
         {/if}

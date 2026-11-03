@@ -1,11 +1,34 @@
 [Desktop Entry]
 Type=Application
 Name=Sniplex
-Comment=Modern desktop screen capture and markup utility
+Comment=Modern desktop screen capture & markup utility
 Exec=/usr/bin/sniplex
 Icon=sniplex
 Terminal=false
 Categories=Graphics;Utility;
 Keywords=screenshot;capture;snip;annotate;
 StartupNotify=true
+Actions=Capture;CaptureFullscreen;CaptureRecord;NewCapture;
+X-DBUS-StartupType=Unique
+X-DBUS-ServiceName=org.sniplex.Sniplex
 X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2
+
+[Desktop Action Capture]
+Name=Capture region
+Exec=/usr/bin/sniplex --capture=overlay
+X-KDE-Shortcuts=Ctrl+Shift+S
+
+[Desktop Action CaptureFullscreen]
+Name=Capture entire screen
+Exec=/usr/bin/sniplex --capture=fullscreen
+X-KDE-Shortcuts=Ctrl+Print
+
+[Desktop Action CaptureRecord]
+Name=Start screen recording
+Exec=/usr/bin/sniplex --capture=record
+X-KDE-Shortcuts=Ctrl+Shift+R
+
+[Desktop Action NewCapture]
+Name=New capture
+Exec=/usr/bin/sniplex --capture=new
+X-KDE-Shortcuts=Ctrl+N

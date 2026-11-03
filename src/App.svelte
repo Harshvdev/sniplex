@@ -7,14 +7,13 @@
   import FloatingOverlay from './lib/components/FloatingOverlay.svelte';
   import SettingsModal from './lib/components/SettingsModal.svelte';
   import { AlertCircle, Check, Timer } from '@lucide/svelte';
-  import { loadShortcuts, matchesShortcut, type ShortcutItem } from './lib/shortcuts';
+  import { loadShortcuts, matchesShortcut, saveShortcuts, type ShortcutItem } from './lib/shortcuts';
   import type {
     CaptureMode,
     SnipType,
     SnipDelay,
     ToolType,
     ShapeKind,
-    AppTheme,
     TabItem,
     AppView,
     DesktopCapture,
@@ -28,16 +27,20 @@
   import { playTimerChime } from './lib/audio';
   import { clampZoom, zoomIn, zoomOut } from './lib/viewport';
   import { copyImageToClipboard } from './lib/clipboard';
+  import { settings } from './lib/settings.svelte';
+  import { applyCaptureOutline } from './lib/outline';
+  import { applySystemShortcuts, readSystemShortcuts, syncGlobalShortcuts } from './lib/global-shortcuts';
 
   // Svelte 5 Runes State
-  let theme = $state<AppTheme>(
-    (typeof localStorage !== 'undefined' && (localStorage.getItem('sniplex_theme') as AppTheme)) || 'dark'
-  );
+  let theme = $derived(settings.theme);
 
   $effect(() => {
+    const activeTheme = settings.theme;
     const isDark =
-      theme === 'dark' ||
-      (theme === 'system' && typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      activeTheme === 'dark' ||
+      (activeTheme === 'system' &&
+        typeof window !== 'undefined' &&
+        window.matchMedia('(prefers-color-scheme: dark)').matches);
 
     if (typeof document !== 'undefined') {
       if (isDark) {
@@ -48,14 +51,13 @@
         document.documentElement.classList.add('light');
       }
     }
-    try {
-      localStorage.setItem('sniplex_theme', theme);
-    } catch {}
   });
 
   let view = $state<AppView>('empty');
   let isOverlayActive = $state(false);
   let shortcuts = $state<ShortcutItem[]>(loadShortcuts());
+  /** True when the desktop entry owns the keys, so edits go to the desktop. */
+  let desktopOwnsShortcuts = false;
 
   const savedMode =
     typeof localStorage !== 'undefined'
@@ -121,6 +123,7 @@
   let activeTool = $state<ToolType>('pen');
   let penColor = $state('#0078d4');
   let penSize = $state(3);
+  let penOpacity = $state(100);
   let highlighterColor = $state('#ffeb3b');
   let highlighterSize = $state(18);
   let shapeKind = $state<ShapeKind>('rectangle');
@@ -131,7 +134,7 @@
   let canvasArea = $state<CanvasAreaApi | null>(null);
 
   // Clipboard synchronization state.
-  let autoCopy = $state<boolean>(loadAutoCopySetting());
+  let autoCopy = $derived(settings.autoCopy);
   let pendingAutoCopy = false;
   let isCopying = false;
 
@@ -200,20 +203,56 @@
     link.click();
   }
 
-  function loadAutoCopySetting(): boolean {
-    if (typeof localStorage === 'undefined') return true;
-    const stored = localStorage.getItem('sniplex_auto_copy');
-    return stored === null ? true : stored === 'true';
+  function captureFileName(): string {
+    const now = new Date();
+    const pad = (value: number) => String(value).padStart(2, '0');
+    return `Sniplex_${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}.png`;
   }
 
-  function handleAutoCopyChange(value: boolean) {
-    autoCopy = value;
+  /** Writes an automatically saved capture to the configured folder. */
+  async function saveCaptureToDisk(imageUrl: string, width: number, height: number): Promise<void> {
+    if (!settings.autoSaveScreenshots || !imageUrl || !isTauriEnvironment()) return;
+
+    const comma = imageUrl.indexOf(',');
+    if (comma < 0) return;
+
     try {
-      localStorage.setItem('sniplex_auto_copy', String(value));
-    } catch {}
+      const { invoke } = await import('@tauri-apps/api/core');
+      const path = await invoke<string>('save_screenshot', {
+        folder: settings.screenshotFolder,
+        fileName: captureFileName(),
+        pngBase64: imageUrl.slice(comma + 1),
+      });
+      if (path) console.info(`Capture saved to ${path}`);
+    } catch (err) {
+      console.warn('Failed to save capture:', err);
+      if (settings.announcements) announce('Could not save the screenshot to disk');
+    }
   }
 
-  function announceCopy(message: string) {
+  /** Applies the optional screenshot frame and persists the original capture. */
+  async function prepareCapturedImage(
+    imageUrl: string,
+    width: number,
+    height: number
+  ): Promise<{ imageUrl: string; width: number; height: number }> {
+    if (!imageUrl) return { imageUrl, width, height };
+
+    const outlined = await applyCaptureOutline(imageUrl, width, height, {
+      enabled: settings.outlineEnabled,
+      color: settings.outlineColor,
+      width: settings.outlineWidth,
+    });
+
+    void saveCaptureToDisk(outlined.imageUrl, outlined.width, outlined.height);
+    return outlined;
+  }
+
+  function announce(message: string) {
+    if (!settings.announcements) {
+      copyAnnouncement = '';
+      return;
+    }
     copyAnnouncement = '';
     if (announceTimer) clearTimeout(announceTimer);
     announceTimer = window.setTimeout(() => {
@@ -239,20 +278,20 @@
     try {
       const blob = await canvasArea.exportPngBlob();
       if (!blob) {
-        announceCopy('Could not copy image to clipboard');
+        announce('Could not copy image to clipboard');
         showCopyToast(false);
         return false;
       }
 
       const result = await copyImageToClipboard(blob);
       if (result.ok) {
-        announceCopy('Composite image copied to clipboard');
+        announce('Composite image copied to clipboard');
         showCopyToast(true);
         return true;
       }
 
       console.warn('Clipboard copy error:', result.error);
-      announceCopy('Could not copy image to clipboard');
+      announce('Could not copy image to clipboard');
       showCopyToast(false);
       return false;
     } finally {
@@ -316,6 +355,9 @@
 
   // Dedicated overlay instance states
   const isOverlayInstance = typeof window !== 'undefined' && window.location.hash === '#overlay';
+  const captureHash = typeof window !== 'undefined' ? window.location.hash : '';
+  const isCaptureInstance = captureHash.startsWith('#capture=');
+  const captureToken = isCaptureInstance ? captureHash.slice('#capture='.length) : '';
   let overlayCapture = $state<DesktopCapture | null>(null);
   let overlayFrameBitmap = $state<ImageBitmap | null>(null);
   let overlayMode = $state<CaptureMode>('snip');
@@ -491,6 +533,46 @@
           if ([0, 3, 5, 10].includes(sd)) delay = sd;
         }
 
+        if (isCaptureInstance && captureToken) {
+          try {
+            const { invoke } = await import('@tauri-apps/api/core');
+            const payload = await invoke<{
+              imageUrl: string;
+              width: number;
+              height: number;
+              title?: string;
+            } | null>('take_capture_payload', { token: captureToken });
+
+            if (payload) {
+              const sized = await prepareCapturedImage(
+                payload.imageUrl,
+                payload.width,
+                payload.height
+              );
+              const id = `tab-${Date.now()}`;
+              tabs = [
+                ...tabs,
+                {
+                  id,
+                  title: payload.title || `Snip ${sized.width}×${sized.height}`,
+                  imageUrl: sized.imageUrl,
+                  width: sized.width,
+                  height: sized.height,
+                  timestamp: 'Just now',
+                },
+              ];
+              activeTabId = id;
+              view = 'editor';
+              pendingAutoCopy = true;
+              announce(`Screenshot opened, ${sized.width} by ${sized.height} pixels`);
+              await tick();
+              canvasArea?.fitToViewport();
+            }
+          } catch (err) {
+            console.warn('Failed to open the capture in this window:', err);
+          }
+        }
+
         // Main editor window: listen for snip completion and delay synchronization from overlay window
         const { listen } = await import('@tauri-apps/api/event');
         listen<CapturePayload>('snip-captured', (event) => {
@@ -537,6 +619,38 @@
             }
           });
         }
+
+        // Only the editor window answers desktop activations; a capture window
+        // must not handle the same request a second time.
+        if (!isCaptureInstance) {
+          window.addEventListener('sniplex-global-shortcut', handleGlobalShortcutEvent);
+          await syncGlobalShortcuts(shortcuts);
+
+          // Where the desktop owns the keys, its bindings are what actually
+          // fires, so the in-app handler and the settings list follow them
+          // instead of a private copy that would drift on the first change.
+          const desktopBindings = await readSystemShortcuts();
+          if (desktopBindings) {
+            desktopOwnsShortcuts = true;
+            shortcuts = shortcuts.map((shortcut) =>
+              desktopBindings[shortcut.id]
+                ? { ...shortcut, keys: desktopBindings[shortcut.id] }
+                : shortcut
+            );
+            saveShortcuts(shortcuts);
+          }
+
+          listen('sniplex-capture-request', async () => {
+            const { invoke } = await import('@tauri-apps/api/core');
+            const action = await invoke<string | null>('take_launch_action');
+            if (action) runCaptureAction(action);
+          });
+
+          // A shortcut press that started this process is waiting already.
+          const { invoke } = await import('@tauri-apps/api/core');
+          const pendingAction = await invoke<string | null>('take_launch_action');
+          if (pendingAction) runCaptureAction(pendingAction);
+        }
       }
     }
   });
@@ -554,7 +668,10 @@
     });
     if (isTauriEnvironment()) {
       const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('complete_capture', { payload });
+      await invoke('complete_capture', {
+        payload,
+        openInNewWindow: settings.multipleInstances,
+      });
     }
   }
 
@@ -622,7 +739,9 @@
       if (isTauriEnvironment()) {
         mark('main.hide_call');
         const { getCurrentWindow } = await import('@tauri-apps/api/window');
-        await getCurrentWindow().hide();
+        const currentWindow = getCurrentWindow();
+        const originLabel = currentWindow.label;
+        await currentWindow.hide();
         mark('main.hidden');
 
         const { invoke } = await import('@tauri-apps/api/core');
@@ -630,10 +749,12 @@
           mode,
           snipType,
           delay,
+          includeCursor: settings.includeCursor,
+          originLabel,
         });
         mark('main.command_done');
       } else {
-        const res = await captureDesktopDisplay();
+        const res = await captureDesktopDisplay(settings.includeCursor);
         desktopCapture = res.capture;
         wasWindowMaximized = res.wasMaximized;
 
@@ -789,6 +910,32 @@
       }
     }
 
+    // Each capture gets its own standalone editor window when requested. The
+    // new surface applies the frame, saves, and copies using its own settings.
+    if (settings.multipleInstances && isTauriEnvironment() && imageUrl) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('open_capture_window', {
+          payload: {
+            imageUrl,
+            width,
+            height,
+            title: `Snip ${width}×${height}`,
+          },
+        });
+        desktopCapture = null;
+        pendingAutoCopy = false;
+        return;
+      } catch (err) {
+        console.warn('Could not open a dedicated capture window, using this window:', err);
+      }
+    }
+
+    const sized = await prepareCapturedImage(imageUrl, width, height);
+    imageUrl = sized.imageUrl;
+    width = sized.width;
+    height = sized.height;
+
     tabs = [
       ...tabs,
       {
@@ -803,6 +950,9 @@
     activeTabId = newId;
     desktopCapture = null;
     pendingAutoCopy = imageUrl.length > 0;
+    if (imageUrl) {
+      announce(`Screenshot captured, ${width} by ${height} pixels`);
+    }
 
     await tick();
     canvasArea?.fitToViewport();
@@ -811,6 +961,86 @@
   function handleTriggerOcr() {
     activeTool = 'text';
     handleTriggerNew();
+  }
+
+  async function triggerFullscreenCapture() {
+    if (isTauriEnvironment()) {
+      snipType = 'fullscreen';
+      await startCaptureFlow();
+      return;
+    }
+
+    const res = await captureDesktopDisplay(settings.includeCursor);
+    wasWindowMaximized = res.wasMaximized;
+    await handleCapture({
+      imageUrl: res.capture.image_data_url,
+      width: res.capture.width,
+      height: res.capture.height,
+      mode: 'fullscreen',
+    });
+  }
+
+  /**
+   * Applies a shortcut edit. Where the desktop owns the keys the change is
+   * written there first, and a refusal — most often another application
+   * already holding the key — leaves the previous binding in place so the list
+   * never claims something the desktop is not listening for.
+   */
+  async function handleShortcutsChange(
+    next: ShortcutItem[],
+    _changedId: string
+  ): Promise<string | null> {
+    const previous = shortcuts;
+    shortcuts = next;
+    saveShortcuts(next);
+
+    if (!desktopOwnsShortcuts) {
+      void syncGlobalShortcuts(next);
+      return null;
+    }
+
+    const error = await applySystemShortcuts(next);
+    if (error) {
+      shortcuts = previous;
+      saveShortcuts(previous);
+      return error;
+    }
+
+    return null;
+  }
+
+  /**
+   * Runs a capture request. The desktop can deliver the same press through more
+   * than one path, so repeats of one action are ignored for a moment.
+   */
+  const handledActions = new Map<string, number>();
+
+  function runCaptureAction(id: string) {
+    const now = Date.now();
+    if (now - (handledActions.get(id) ?? 0) < 600) return;
+    handledActions.set(id, now);
+
+    if (id === 'overlay') {
+      mode = 'snip';
+      handleTriggerNew();
+    } else if (id === 'record') {
+      mode = 'record';
+      handleTriggerNew();
+    } else if (id === 'fullscreen') {
+      snipType = 'fullscreen';
+      void triggerFullscreenCapture();
+    } else {
+      handleTriggerNew();
+    }
+  }
+
+  /** Desktop activation, from the portal or the entry that started this launch. */
+  function handleGlobalShortcutEvent(event: Event) {
+    const detail = (event as CustomEvent<{ id?: string }>).detail;
+    if (!detail?.id) return;
+    if (isOverlayActive || isOverlayInstance || countdown !== null) return;
+
+    runCaptureAction(detail.id);
   }
 
   function handleGlobalKeyDown(e: KeyboardEvent) {
@@ -827,8 +1057,16 @@
       return;
     }
 
-    // Direct PrintScreen key
-    if (e.key === 'PrintScreen' || e.key === 'Snapshot') {
+    // Direct PrintScreen key, when the preference is enabled. Modified
+    // combinations fall through to the customisable shortcuts below.
+    if (
+      settings.printScreenShortcut &&
+      !e.ctrlKey &&
+      !e.altKey &&
+      !e.metaKey &&
+      !e.shiftKey &&
+      (e.key === 'PrintScreen' || e.key === 'Snapshot')
+    ) {
       e.preventDefault();
       mode = 'snip';
       handleTriggerNew();
@@ -839,39 +1077,28 @@
     const overlayShortcut = shortcuts.find((s) => s.id === 'overlay');
     if (overlayShortcut && matchesShortcut(e, overlayShortcut.keys)) {
       e.preventDefault();
-      mode = 'snip';
-      handleTriggerNew();
+      runCaptureAction('overlay');
       return;
     }
 
     const recordShortcut = shortcuts.find((s) => s.id === 'record');
     if (recordShortcut && matchesShortcut(e, recordShortcut.keys)) {
       e.preventDefault();
-      mode = 'record';
-      handleTriggerNew();
+      runCaptureAction('record');
       return;
     }
 
     const fullscreenShortcut = shortcuts.find((s) => s.id === 'fullscreen');
     if (fullscreenShortcut && matchesShortcut(e, fullscreenShortcut.keys)) {
       e.preventDefault();
-      snipType = 'fullscreen';
-      captureDesktopDisplay().then((res) => {
-        wasWindowMaximized = res.wasMaximized;
-        handleCapture({
-          imageUrl: res.capture.image_data_url,
-          width: res.capture.width,
-          height: res.capture.height,
-          mode: 'fullscreen',
-        });
-      });
+      runCaptureAction('fullscreen');
       return;
     }
 
     const newCaptureShortcut = shortcuts.find((s) => s.id === 'newCapture');
     if (newCaptureShortcut && matchesShortcut(e, newCaptureShortcut.keys)) {
       e.preventDefault();
-      handleTriggerNew();
+      runCaptureAction('newCapture');
       return;
     }
 
@@ -973,6 +1200,7 @@
         {activeTool}
         {penColor}
         {penSize}
+        {penOpacity}
         {highlighterColor}
         {highlighterSize}
         {shapeKind}
@@ -987,6 +1215,7 @@
         onToolChange={(t) => activeTool = t}
         onPenColorChange={(c) => penColor = c}
         onPenSizeChange={(s) => penSize = s}
+        onPenOpacityChange={(o) => penOpacity = o}
         onHighlighterColorChange={(c) => highlighterColor = c}
         onHighlighterSizeChange={(s) => highlighterSize = s}
         onShapeKindChange={(s) => shapeKind = s}
@@ -1010,12 +1239,8 @@
       <!-- 3. Main Body View (Canvas, Empty, or Settings) -->
       {#if view === 'settings'}
         <SettingsModal
-          {theme}
-          {autoCopy}
-          onAutoCopyChange={handleAutoCopyChange}
           onClose={() => view = tabs.length > 0 ? 'editor' : 'empty'}
-          onThemeChange={(t) => theme = t}
-          onShortcutsChange={(s) => shortcuts = s}
+          onShortcutsChange={handleShortcutsChange}
         />
       {:else if view === 'empty' || tabs.length === 0}
         <EmptyState />
@@ -1029,6 +1254,7 @@
           {activeTool}
           {penColor}
           {penSize}
+          {penOpacity}
           {highlighterColor}
           {highlighterSize}
           {isCropping}
