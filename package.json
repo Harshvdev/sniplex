@@ -26,7 +26,6 @@
   "dependencies": {
     "@lucide/svelte": "^1.64.0",
     "@tauri-apps/api": "^2.12.4",
-    "@tauri-apps/plugin-global-shortcut": "^2.4.1",
     "bits-ui": "^2.20.2",
     "clsx": "^2.1.1",
     "tailwind-merge": "^3.7.0"

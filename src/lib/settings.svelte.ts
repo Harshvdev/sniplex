@@ -14,7 +14,6 @@ export interface SniplexSettings {
   multipleInstances: boolean;
   askToSave: boolean;
   announcements: boolean;
-  printScreenShortcut: boolean;
   recordMicrophone: boolean;
   recordSystemAudio: boolean;
 }
@@ -38,7 +37,6 @@ export const DEFAULT_SETTINGS: SniplexSettings = {
   multipleInstances: false,
   askToSave: true,
   announcements: true,
-  printScreenShortcut: true,
   recordMicrophone: false,
   recordSystemAudio: true,
 };
@@ -106,7 +104,6 @@ export function loadSettings(): SniplexSettings {
       multipleInstances: asBoolean(parsed.multipleInstances, base.multipleInstances),
       askToSave: asBoolean(parsed.askToSave, base.askToSave),
       announcements: asBoolean(parsed.announcements, base.announcements),
-      printScreenShortcut: asBoolean(parsed.printScreenShortcut, base.printScreenShortcut),
       recordMicrophone: asBoolean(parsed.recordMicrophone, base.recordMicrophone),
       recordSystemAudio: asBoolean(parsed.recordSystemAudio, base.recordSystemAudio),
     };

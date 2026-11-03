@@ -1057,22 +1057,6 @@
       return;
     }
 
-    // Direct PrintScreen key, when the preference is enabled. Modified
-    // combinations fall through to the customisable shortcuts below.
-    if (
-      settings.printScreenShortcut &&
-      !e.ctrlKey &&
-      !e.altKey &&
-      !e.metaKey &&
-      !e.shiftKey &&
-      (e.key === 'PrintScreen' || e.key === 'Snapshot')
-    ) {
-      e.preventDefault();
-      mode = 'snip';
-      handleTriggerNew();
-      return;
-    }
-
     // Check customizable shortcuts
     const overlayShortcut = shortcuts.find((s) => s.id === 'overlay');
     if (overlayShortcut && matchesShortcut(e, overlayShortcut.keys)) {

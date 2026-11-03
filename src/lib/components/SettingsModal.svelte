@@ -1,7 +1,9 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { ArrowLeft, RotateCcw } from '@lucide/svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { settings, updateSettings, persistSettings } from '../settings.svelte';
+  import { isTauriEnvironment } from '../capture';
   import {
     loadShortcuts,
     saveShortcuts,
@@ -77,7 +79,84 @@
     shortcuts.some((s) => !areKeysEqual(s.keys, s.defaultKeys))
   );
 
-  function startRecording(id: string) {
+  // Native key capture gives the full modifier mask to the Linux backend. It
+  // is used when available; ordinary browser key events remain the fallback.
+  const MODIFIER_ORDER = ['Ctrl', 'Shift', 'Alt', 'Super'] as const;
+  const MODIFIER_KEYS = ['Control', 'Shift', 'Alt', 'Meta'];
+  const STANDALONE_KEYS = [
+    'PrintScreen',
+    ...Array.from({ length: 12 }, (_, index) => `F${index + 1}`),
+  ];
+
+  let nativeRecorderAvailable = $state(false);
+
+  function orderedModifiers(modifiers: Iterable<string>): string[] {
+    const found = new Set<string>(modifiers);
+    return MODIFIER_ORDER.filter((modifier) => found.has(modifier));
+  }
+
+  function modifierFromEvent(e: KeyboardEvent): string[] {
+    const found = new Set<string>();
+    if (e.ctrlKey) found.add('Ctrl');
+    if (e.shiftKey) found.add('Shift');
+    if (e.altKey) found.add('Alt');
+    if (e.metaKey) found.add('Super');
+
+    if (typeof e.getModifierState === 'function') {
+      if (e.getModifierState('Control')) found.add('Ctrl');
+      if (e.getModifierState('Shift')) found.add('Shift');
+      if (e.getModifierState('Alt')) found.add('Alt');
+      if (
+        e.getModifierState('Meta') ||
+        e.getModifierState('Super') ||
+        e.getModifierState('OS')
+      ) {
+        found.add('Super');
+      }
+    }
+
+    return orderedModifiers(found);
+  }
+
+  function isModifierKey(key: string): boolean {
+    return ['Ctrl', 'Shift', 'Alt', 'Super', 'Control', 'Meta'].includes(key);
+  }
+
+  function isStandaloneKey(key: string): boolean {
+    return STANDALONE_KEYS.includes(key);
+  }
+
+  async function setNativeRecording(enabled: boolean): Promise<boolean> {
+    if (!isTauriEnvironment()) return false;
+
+    try {
+      return await invoke<boolean>('set_shortcut_recording', { enabled });
+    } catch {
+      return false;
+    }
+  }
+
+  function stopNativeRecording() {
+    nativeRecorderAvailable = false;
+    void setNativeRecording(false);
+  }
+
+  onMount(() => {
+    const onRawKey = (event: Event) =>
+      handleNativeKey(
+        event as CustomEvent<{ key: string; modifiers: string[] }>
+      );
+
+    window.addEventListener('sniplex-raw-key', onRawKey as EventListener, true);
+
+    return () => {
+      window.removeEventListener('sniplex-raw-key', onRawKey as EventListener, true);
+      void setNativeRecording(false);
+    };
+  });
+
+  async function startRecording(id: string) {
+    nativeRecorderAvailable = await setNativeRecording(true);
     recordingId = id;
     tempModifiers = [];
     shortcutError = null;
@@ -89,6 +168,7 @@
     tempModifiers = [];
     shortcutError = null;
     shortcutErrorId = null;
+    stopNativeRecording();
   }
 
   /**
@@ -114,18 +194,15 @@
     }
   }
 
-  async function handleRecordKey(e: KeyboardEvent) {
+  function commitRecordedKey(
+    modifiers: string[],
+    primaryKey: string | null,
+    isValidCombination: boolean
+  ) {
     if (!recordingId) return;
 
-    e.preventDefault();
-    e.stopPropagation();
-
-    if (e.key === 'Escape') {
-      cancelRecording();
-      return;
-    }
-
-    const { modifiers, primaryKey, isValidCombination } = parseKeyEvent(e);
+    const changedId = recordingId;
+    const previous = shortcuts;
 
     if (!primaryKey) {
       tempModifiers = modifiers;
@@ -133,13 +210,11 @@
       return;
     }
 
-    if (!isValidCombination) {
+    if (!isValidCombination && modifiers.length === 0) {
       shortcutError = 'Shortcut must include Ctrl, Alt, Shift, or a function key';
       return;
     }
 
-    const changedId = recordingId;
-    const previous = shortcuts;
     const newKeys = [...modifiers, primaryKey];
 
     const next = shortcuts.map((s) => {
@@ -155,7 +230,47 @@
     recordingId = null;
     tempModifiers = [];
     shortcutError = null;
-    await commitShortcut(next, previous, changedId);
+    stopNativeRecording();
+    void commitShortcut(next, previous, changedId);
+  }
+
+  function handleNativeKey(event: CustomEvent<{ key: string; modifiers: string[] }>) {
+    if (!recordingId || !nativeRecorderAvailable) return;
+
+    const { key, modifiers } = event.detail;
+    const ordered = orderedModifiers(modifiers);
+
+    if (key === 'Escape') {
+      cancelRecording();
+      return;
+    }
+
+    if (isModifierKey(key)) {
+      tempModifiers = ordered;
+      shortcutError = null;
+      return;
+    }
+
+    const isValidCombination =
+      ordered.length > 0 || isStandaloneKey(key);
+
+    commitRecordedKey(ordered, key, isValidCombination);
+  }
+
+  async function handleRecordKey(e: KeyboardEvent) {
+    if (!recordingId || nativeRecorderAvailable) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (e.key === 'Escape') {
+      cancelRecording();
+      return;
+    }
+
+    const { primaryKey, isValidCombination } = parseKeyEvent(e);
+    const modifiers = modifierFromEvent(e);
+    commitRecordedKey(modifiers, primaryKey, isValidCombination);
   }
 
   async function resetShortcut(id: string) {
@@ -177,6 +292,7 @@
       defaultKeys: [...s.defaultKeys],
     }));
     recordingId = null;
+    stopNativeRecording();
     await commitShortcut(next, previous, 'all');
   }
 
@@ -647,27 +763,6 @@
       </div>
 
       <div class="bg-white dark:bg-[#1c1c1c] rounded-lg border border-black/10 dark:border-white/10 shadow-xs divide-y divide-black/5 dark:divide-white/5 overflow-hidden">
-        <!-- Print screen key shortcut toggle -->
-        <div class="flex items-center justify-between p-4 gap-4">
-          <div>
-            <div class="text-[13px] font-medium text-neutral-900 dark:text-neutral-100">Print screen key shortcut</div>
-            <div class="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5">Use the Print screen key to open the screen capture overlay</div>
-          </div>
-
-          <button
-            type="button"
-            role="switch"
-            aria-checked={settings.printScreenShortcut}
-            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {settings.printScreenShortcut ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
-            onclick={() => updateSettings({ printScreenShortcut: !settings.printScreenShortcut })}
-            title="Toggle Print Screen shortcut"
-          >
-            <span
-              class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {settings.printScreenShortcut ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
-            ></span>
-          </button>
-        </div>
-
         <!-- Customizable shortcuts list -->
         {#each shortcuts as sc (sc.id)}
           <div class="p-4">

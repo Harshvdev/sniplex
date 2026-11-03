@@ -94,7 +94,13 @@ fn read_all(connection: &Connection) -> Result<Vec<Binding>, String> {
     Ok(bindings)
 }
 
-fn read(connection: &Connection, action: &str, friendly: &str) -> Result<Vec<i32>, String> {
+/// Reads every shortcut the desktop stores for one action. A zeroed chord is
+/// empty, so those slots and sequences are discarded.
+fn read_sequences(
+    connection: &Connection,
+    action: &str,
+    friendly: &str,
+) -> Result<Vec<Vec<i32>>, String> {
     let reply = connection
         .call_method(
             Some(SERVICE),
@@ -111,8 +117,16 @@ fn read(connection: &Connection, action: &str, friendly: &str) -> Result<Vec<i32
         .map_err(|error| error.to_string())?;
 
     Ok(sequences
-        .first()
-        .map(|(sequence,)| used_codes(sequence))
+        .into_iter()
+        .map(|(sequence,)| used_codes(&sequence))
+        .filter(|sequence| !sequence.is_empty())
+        .collect())
+}
+
+fn read(connection: &Connection, action: &str, friendly: &str) -> Result<Vec<i32>, String> {
+    Ok(read_sequences(connection, action, friendly)?
+        .into_iter()
+        .next()
         .unwrap_or_default())
 }
 

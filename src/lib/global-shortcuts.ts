@@ -2,38 +2,6 @@ import { isTauriEnvironment } from './capture';
 import { decodeCode, encodeShortcut } from './qt-keys';
 import type { ShortcutItem } from './shortcuts';
 
-const MODIFIERS: Record<string, string> = {
-  ctrl: 'CommandOrControl',
-  control: 'CommandOrControl',
-  shift: 'Shift',
-  alt: 'Alt',
-  super: 'Super',
-  meta: 'Super',
-};
-
-/** Accelerator names used by the direct key-grab fallback. */
-const KEY_NAMES: Record<string, string> = {
-  space: 'Space',
-  printscreen: 'PrintScreen',
-  snapshot: 'PrintScreen',
-  escape: 'Escape',
-  esc: 'Escape',
-  enter: 'Enter',
-  return: 'Enter',
-  tab: 'Tab',
-  backspace: 'Backspace',
-  delete: 'Delete',
-  insert: 'Insert',
-  home: 'Home',
-  end: 'End',
-  pageup: 'PageUp',
-  pagedown: 'PageDown',
-  arrowup: 'ArrowUp',
-  arrowdown: 'ArrowDown',
-  arrowleft: 'ArrowLeft',
-  arrowright: 'ArrowRight',
-};
-
 /** Key names accepted by the XDG shortcuts specification. */
 const TRIGGER_KEY_NAMES: Record<string, string> = {
   printscreen: 'Print',
@@ -98,27 +66,6 @@ export function shortcutToTrigger(keys: string[]): string | null {
   return [...modifiers, primary].join('+');
 }
 
-
-/** Converts the app's key list into a desktop accelerator string. */
-export function shortcutToAccelerator(keys: string[]): string | null {
-  if (!keys || keys.length === 0) return null;
-
-  const modifiers: string[] = [];
-  let primary: string | null = null;
-
-  for (const key of keys) {
-    const modifier = MODIFIERS[key.toLowerCase()];
-    if (modifier) {
-      if (!modifiers.includes(modifier)) modifiers.push(modifier);
-      continue;
-    }
-    primary = KEY_NAMES[key.toLowerCase()] ?? (key.length === 1 ? key.toUpperCase() : key);
-  }
-
-  if (!primary) return null;
-  return [...modifiers, primary].join('+');
-}
-
 /**
  * Registers the capture shortcuts on desktops that take them from a running
  * application instead of the desktop entry.
@@ -140,36 +87,17 @@ export async function syncGlobalShortcuts(shortcuts: ShortcutItem[]): Promise<vo
       item.trigger !== null
     );
 
-  if (portalShortcuts.length > 0) {
-    try {
-      await listenForPortalActivations();
-      const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('sync_global_shortcuts', { shortcuts: portalShortcuts });
-      return;
-    } catch (err) {
-      console.warn('Desktop global shortcuts are unavailable, trying direct key grabs:', err);
-    }
-  }
+  if (portalShortcuts.length === 0) return;
 
   try {
-    const { register, unregisterAll } = await import('@tauri-apps/plugin-global-shortcut');
-    await unregisterAll();
-
-    for (const item of shortcuts) {
-      const accelerator = shortcutToAccelerator(item.keys);
-      if (!accelerator) continue;
-
-      try {
-        await register(accelerator, (event) => {
-          if (event.state !== 'Pressed') return;
-          dispatchShortcut(item.id);
-        });
-      } catch (err) {
-        console.warn(`Unable to register global shortcut ${accelerator}:`, err);
-      }
-    }
+    await listenForPortalActivations();
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('sync_global_shortcuts', { shortcuts: portalShortcuts });
   } catch (err) {
-    console.warn('Global shortcuts are unavailable in this environment:', err);
+    // There is no portable fallback to grabbing keys directly. The shortcut
+    // remains available while Sniplex is focused, but the desktop owns
+    // global shortcuts if it supports the common shortcut portal.
+    console.warn('Desktop global shortcuts are unavailable:', err);
   }
 }
 

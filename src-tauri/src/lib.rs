@@ -13,6 +13,7 @@ use zbus::zvariant::Value;
 mod capture_kwin;
 mod global_shortcuts;
 mod kde_shortcuts;
+mod key_recorder;
 mod launcher;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -1303,7 +1304,6 @@ pub fn run() {
     }
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(launcher::LaunchState::new(action))
         .invoke_handler(tauri::generate_handler![
             select_folder,
@@ -1325,6 +1325,7 @@ pub fn run() {
             exit_app,
             sync_global_shortcuts,
             take_launch_action,
+            key_recorder::set_shortcut_recording,
             list_global_shortcuts,
             set_global_shortcuts
         ])
@@ -1346,6 +1347,8 @@ pub fn run() {
             // replaced by one that forwards the scale to the frontend instead.
             #[cfg(target_os = "linux")]
             if let Some(window) = app.get_webview_window("main") {
+                key_recorder::attach(&window);
+
                 let _ = window.with_webview(|webview| {
                     use gtk::prelude::*;
                     use webkit2gtk::WebViewExt;
