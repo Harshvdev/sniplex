@@ -7,9 +7,9 @@
     Pen,
     Highlighter,
     Eraser,
-    Ruler,
     Hand,
     Crop,
+    Type,
     ScanText,
     Shapes,
     Undo2,
@@ -17,6 +17,7 @@
     Save,
     Copy,
     Share2,
+    Palette,
     MoreHorizontal,
     Check,
     Settings,
@@ -27,6 +28,7 @@
     TimerOff,
   } from '@lucide/svelte';
   import SnipIcons from '../icons/SnipIcons.svelte';
+  import { Compass } from '@lucide/svelte';
   import PenFlyout from './PenFlyout.svelte';
   import HighlighterFlyout from './HighlighterFlyout.svelte';
   import ShapesFlyout from './ShapesFlyout.svelte';
@@ -45,6 +47,11 @@
     shapeKind = 'rectangle',
     zoom = 100,
     hasImage = true,
+    touchWritingEnabled = false,
+    canUndo = false,
+    canRedo = false,
+    undoLabel = null,
+    redoLabel = null,
     isCropping = false,
     onTriggerNew = () => {},
     onModeChange = (m: CaptureMode) => {},
@@ -57,10 +64,31 @@
     onHighlighterColorChange = (c: string) => {},
     onHighlighterSizeChange = (s: number) => {},
     onShapeKindChange = (s: ShapeKind) => {},
+    /** Phase 13: selected shape outline/fill style. */
+    shapeOutlineColor = '#d13438',
+    shapeFillColor = 'transparent',
+    shapeStrokeWidth = 3,
+    onShapeOutlineChange = (c: string) => {},
+    onShapeFillChange = (c: string) => {},
+    onShapeWidthChange = (w: number) => {},
+    /** Phase 13: armed emoji stamp glyph. */
+    emojiGlyph = null,
+    onEmojiSelect = (_glyph: string | null) => {},
     onZoomCommand = (command: ZoomCommand) => {},
     onZoomChange = (value: number) => {},
+    onTouchWritingChange = (enabled: boolean) => {},
     onSave = () => {},
     onCopy = () => {},
+    onUndo = () => {},
+    onRedo = () => {},
+    /** Phase 17: external handoffs. */
+    hasVideo = false,
+    onShare = () => {},
+    onOpenExternalEditor = () => {},
+    onOpenExternalVideoEditor = () => {},
+    /** Phase 18: drafting overlay selection. */
+    draftingTool = 'off',
+    onDraftingChange = (_tool: 'off' | 'ruler' | 'protractor') => {},
     onOpenSettings = () => {},
     onOpenFile = () => {},
     onToggleCrop = () => {},
@@ -80,6 +108,13 @@
     shapeKind: ShapeKind;
     zoom: number;
     hasImage: boolean;
+    /** Phase 8 toggle, independent of the selected markup tool. */
+    touchWritingEnabled: boolean;
+    /** Phase 9: history availability, reflected in button state. */
+    canUndo: boolean;
+    canRedo: boolean;
+    undoLabel: string | null;
+    redoLabel: string | null;
     isCropping: boolean;
     onTriggerNew: () => void;
     onModeChange: (m: CaptureMode) => void;
@@ -92,10 +127,31 @@
     onHighlighterColorChange: (c: string) => void;
     onHighlighterSizeChange: (s: number) => void;
     onShapeKindChange: (s: ShapeKind) => void;
+    /** Phase 13: selected shape outline/fill style. */
+    shapeOutlineColor: string;
+    shapeFillColor: string;
+    shapeStrokeWidth: number;
+    onShapeOutlineChange: (c: string) => void;
+    onShapeFillChange: (c: string) => void;
+    onShapeWidthChange: (w: number) => void;
+    /** Phase 13: armed emoji stamp glyph. */
+    emojiGlyph: string | null;
+    onEmojiSelect: (glyph: string | null) => void;
     onZoomCommand: (command: ZoomCommand) => void;
     onZoomChange: (value: number) => void;
+    onTouchWritingChange: (enabled: boolean) => void;
     onSave: () => void;
     onCopy: () => void;
+    onUndo: () => void;
+    onRedo: () => void;
+    /** Phase 17: external handoffs. */
+    hasVideo: boolean;
+    onShare: () => void;
+    onOpenExternalEditor: () => void;
+    onOpenExternalVideoEditor: () => void;
+    /** Phase 18: drafting overlay selection. */
+    draftingTool: 'off' | 'ruler' | 'protractor';
+    onDraftingChange: (tool: 'off' | 'ruler' | 'protractor') => void;
     onOpenSettings: () => void;
     onOpenFile: () => void;
     onToggleCrop: () => void;
@@ -368,22 +424,42 @@
         {/if}
       </div>
 
-      <!-- Ruler / Protractor Tool -->
-      <button
-        type="button"
-        class="w-8 h-8 rounded-[6px] flex items-center justify-center transition-colors {activeTool === 'ruler' ? 'bg-black/[0.08] dark:bg-white/[0.12] text-neutral-900 dark:text-white' : 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300'}"
-        onclick={() => onToolChange(activeTool === 'ruler' ? 'select' : 'ruler')}
-        title="Ruler / Protractor"
-      >
-        <Ruler class="w-4 h-4 stroke-[1.8]" />
-      </button>
+      <!-- Ruler / Protractor Tool (Phase 18: dropdown overlay selector) -->
+      <div class="relative flyout-container">
+        <button
+          type="button"
+          class="w-8 h-8 rounded-[6px] flex items-center justify-center transition-colors {draftingTool !== 'off' ? 'bg-black/[0.08] dark:bg-white/[0.12] text-neutral-900 dark:text-white' : 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300'}"
+          onclick={() => toggleFlyout('drafting')}
+          title="Ruler / Protractor"
+        >
+          <Compass class="w-4 h-4 stroke-[1.8]" />
+        </button>
 
-      <!-- Touch Writing Toggle -->
+        {#if activeFlyout === 'drafting'}
+          <div class="absolute top-full mt-1.5 left-1/2 -translate-x-1/2 z-50 min-w-[150px] bg-white dark:bg-[#181d28] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_12px_32px_rgba(0,0,0,0.45)] py-1 flex flex-col">
+            {#each [{ id: 'ruler', label: 'Ruler' }, { id: 'protractor', label: 'Protractor' }, { id: 'off', label: 'Off' }] as opt}
+              <button
+                type="button"
+                class="relative flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-left hover:bg-black/[0.05] dark:hover:bg-white/[0.06] rounded-[4px] mx-1 transition-colors text-neutral-800 dark:text-neutral-200"
+                onclick={() => { onDraftingChange(opt.id as 'off' | 'ruler' | 'protractor'); activeFlyout = null; }}
+              >
+                {#if draftingTool === opt.id}
+                  <div class="absolute left-1 w-[2.5px] h-3.5 rounded-full bg-[#0067c0] dark:bg-[#60cdff]"></div>
+                {/if}
+                <span class="ml-2">{opt.label}</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
+
+      <!-- Touch Writing Toggle (Phase 8): independent of the markup tool -->
       <button
         type="button"
-        class="w-8 h-8 rounded-[6px] flex items-center justify-center transition-colors {activeTool === 'touch' ? 'bg-black/[0.08] dark:bg-white/[0.12] text-neutral-900 dark:text-white' : 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300'}"
-        onclick={() => onToolChange(activeTool === 'touch' ? 'select' : 'touch')}
-        title="Touch writing"
+        aria-pressed={touchWritingEnabled}
+        class="w-8 h-8 rounded-[6px] flex items-center justify-center transition-colors {touchWritingEnabled ? 'bg-black/[0.08] dark:bg-white/[0.12] text-neutral-900 dark:text-white' : 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300'}"
+        onclick={() => onTouchWritingChange(!touchWritingEnabled)}
+        title={touchWritingEnabled ? 'Touch writing on — one finger draws' : 'Touch writing off — one finger pans'}
       >
         <Hand class="w-4 h-4 stroke-[1.8]" />
       </button>
@@ -398,18 +474,18 @@
         <Crop class="w-4 h-4 stroke-[1.8]" />
       </button>
 
-      <!-- Text Actions (OCR) -->
+      <!-- Text Insertion Tool -->
       <button
         type="button"
         class="flex items-center gap-1 px-2 py-1.5 rounded-[6px] transition-colors {activeTool === 'text' ? 'bg-black/[0.08] dark:bg-white/[0.12] text-neutral-900 dark:text-white' : 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300'}"
         onclick={() => onToolChange(activeTool === 'text' ? 'select' : 'text')}
-        title="Text actions (OCR)"
+        title="Text"
       >
-        <ScanText class="w-4 h-4 stroke-[1.8]" />
+        <Type class="w-4 h-4 stroke-[1.8]" />
         <span class="text-xs">Text</span>
       </button>
 
-      <!-- Shapes Tool -->
+      <!-- Shapes & Emojis Tool -->
       <div class="relative flyout-container">
         <button
           type="button"
@@ -418,9 +494,12 @@
             if (activeTool === 'shapes') toggleFlyout('shapes');
             else { onToolChange('shapes'); toggleFlyout('shapes'); }
           }}
-          title="Shapes"
+          title={emojiGlyph ? `Stamping ${emojiGlyph}` : 'Shapes & emojis'}
         >
           <Shapes class="w-4 h-4 stroke-[1.8]" />
+          {#if emojiGlyph}
+            <span class="text-sm leading-none">{emojiGlyph}</span>
+          {/if}
           <ChevronDown class="w-3 h-3 text-neutral-500" />
         </button>
 
@@ -428,10 +507,15 @@
           <div class="absolute top-full mt-1.5 left-1/2 -translate-x-1/2 z-50">
             <ShapesFlyout
               shape={shapeKind}
-              strokeColor="#d13438"
-              fillColor="transparent"
-              strokeWidth={3}
-              onSelectShape={(s) => onShapeKindChange(s)}
+              strokeColor={shapeOutlineColor}
+              fillColor={shapeFillColor}
+              strokeWidth={shapeStrokeWidth}
+              selectedEmoji={emojiGlyph}
+              onSelectShape={(s) => { onShapeKindChange(s); onEmojiSelect(null); }}
+              onStrokeColorChange={(c) => onShapeOutlineChange(c)}
+              onFillColorChange={(c) => onShapeFillChange(c)}
+              onStrokeWidthChange={(w) => onShapeWidthChange(w)}
+              onSelectEmoji={(glyph) => onEmojiSelect(emojiGlyph === glyph ? null : glyph)}
             />
           </div>
         {/if}
@@ -439,19 +523,23 @@
 
       <div class="w-[1px] h-5 bg-black/[0.08] dark:bg-white/[0.08] mx-1"></div>
 
-      <!-- Undo / Redo -->
+      <!-- Undo / Redo (Phase 9) -->
       <button
         type="button"
-        class="w-7 h-7 rounded-[5px] flex items-center justify-center hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300 transition-colors"
-        title="Undo (Ctrl+Z)"
+        disabled={!canUndo}
+        class="w-7 h-7 rounded-[5px] flex items-center justify-center transition-colors {canUndo ? 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300' : 'text-neutral-400 dark:text-neutral-600 cursor-not-allowed'}"
+        title={canUndo && undoLabel ? `Undo ${undoLabel} (Ctrl+Z)` : 'Undo (Ctrl+Z)'}
+        onclick={onUndo}
       >
         <Undo2 class="w-3.5 h-3.5 stroke-[1.8]" />
       </button>
 
       <button
         type="button"
-        class="w-7 h-7 rounded-[5px] flex items-center justify-center hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300 transition-colors"
-        title="Redo (Ctrl+Y)"
+        disabled={!canRedo}
+        class="w-7 h-7 rounded-[5px] flex items-center justify-center transition-colors {canRedo ? 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300' : 'text-neutral-400 dark:text-neutral-600 cursor-not-allowed'}"
+        title={canRedo && redoLabel ? `Redo ${redoLabel} (Ctrl+Y)` : 'Redo (Ctrl+Y)'}
+        onclick={onRedo}
       >
         <Redo2 class="w-3.5 h-3.5 stroke-[1.8]" />
       </button>
@@ -532,13 +620,24 @@
         {/if}
       </button>
 
-      <!-- Share Button -->
+      <!-- Share Button (Phase 17) -->
       <button
         type="button"
         class="w-8 h-8 rounded-[6px] flex items-center justify-center hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300 transition-colors"
+        onclick={onShare}
         title="Share"
       >
         <Share2 class="w-4 h-4 stroke-[1.8]" />
+      </button>
+
+      <!-- Edit in External Editor (Phase 17) -->
+      <button
+        type="button"
+        class="w-8 h-8 rounded-[6px] flex items-center justify-center hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300 transition-colors"
+        onclick={hasVideo ? onOpenExternalVideoEditor : onOpenExternalEditor}
+        title={hasVideo ? 'Edit in external video editor' : 'Edit in external image editor'}
+      >
+        <Palette class="w-4 h-4 stroke-[1.8]" />
       </button>
     {/if}
 

@@ -1,3 +1,5 @@
+import type { EditorModel } from './markup';
+
 export type CaptureMode = 'snip' | 'record';
 
 export type SnipType = 'rectangle' | 'window' | 'fullscreen' | 'freeform';
@@ -9,14 +11,11 @@ export type ToolType =
   | 'pen'
   | 'highlighter'
   | 'eraser'
-  | 'ruler'
-  | 'touch'
   | 'crop'
   | 'text'
-  | 'shapes'
-  | 'emoji';
+  | 'shapes';
 
-export type ShapeKind = 'rectangle' | 'oval' | 'line' | 'arrow' | 'star';
+export type ShapeKind = 'rectangle' | 'oval' | 'line' | 'arrow';
 
 export type AppTheme = 'light' | 'dark' | 'system';
 
@@ -26,7 +25,15 @@ export type ZoomCommand = 'in' | 'out' | 'actual' | 'fit';
 
 export interface CanvasAreaApi {
   exportPngBlob(): Promise<Blob | null>;
+  /** Returns the flattened composite canvas (capture + markup), or null when unavailable. */
+  compositeCanvas(): HTMLCanvasElement | null;
   fitToViewport(): boolean;
+  /** Phase 9: restores a history snapshot onto the composite canvas. */
+  restoreSnapshot(data: Uint8ClampedArray, width: number, height: number, model?: EditorModel): void;
+  /** Phase 9: captures the current editor model for history. */
+  captureSnapshot(): { data: Uint8ClampedArray; width: number; height: number; model?: EditorModel } | null;
+  /** Phase 11: removes all ink, keeping the pristine capture. */
+  eraseAllInk(): void;
 }
 
 export interface TabItem {

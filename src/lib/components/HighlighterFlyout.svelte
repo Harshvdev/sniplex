@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { HIGHLIGHTER_PRESETS } from '../highlighter';
+
   let {
     color = '#ffeb3b',
     size = 18,
@@ -11,14 +13,7 @@
     onSizeChange: (s: number) => void;
   } = $props();
 
-  const highlighterColors = [
-    { color: '#ffeb3b', name: 'Yellow' },
-    { color: '#69f0ae', name: 'Green' },
-    { color: '#ff80ab', name: 'Pink' },
-    { color: '#80d8ff', name: 'Blue' },
-    { color: '#ffd180', name: 'Orange' },
-    { color: '#ea80fc', name: 'Purple' },
-  ];
+  const highlighterColors = HIGHLIGHTER_PRESETS.map((p) => ({ color: p.color, name: p.name }));
 </script>
 
 <div class="p-3 w-56 bg-white dark:bg-[#181d28] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_12px_32px_rgba(0,0,0,0.45)] text-neutral-800 dark:text-neutral-100 select-none">

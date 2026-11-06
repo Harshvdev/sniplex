@@ -26,6 +26,12 @@
     cropFromDataUrl,
     cropFreeformFromDataUrl,
   } from '../capture';
+  import {
+    COLOR_PICKER_FORMATS,
+    formatColor,
+    wheelLoupeZoom,
+  } from '../color-picker';
+  import type { ColorFormat, RgbColor } from '../color-picker';
 
   let {
     active = false,
@@ -137,6 +143,78 @@
       cancelled = true;
     };
   });
+
+  // Phase 15: color picker loupe state.
+  let isPickingColor = $state(false);
+  let pickX = $state(0);
+  let pickY = $state(0);
+  let pickFormat = $state<ColorFormat>('HEX');
+  let loupeZoom = $state(6);
+  let loupeUrl = $state('');
+
+  /** Reads the pixel under the pointer from the frozen frame. */
+  function pickColorAt(clientX: number, clientY: number): RgbColor | null {
+    const canvas = frozenCanvasEl;
+    if (!canvas || canvas.width === 0) return null;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / (rect.width || 1);
+    const scaleY = canvas.height / (rect.height || 1);
+    const x = Math.floor((clientX - rect.left) * scaleX);
+    const y = Math.floor((clientY - rect.top) * scaleY);
+    try {
+      const context = canvas.getContext('2d');
+      if (!context) return null;
+      const imageData = context.getImageData(x, y, 1, 1);
+      return { r: imageData.data[0], g: imageData.data[1], b: imageData.data[2] };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Renders the magnified loupe region as a data URL. */
+  function renderLoupe() {
+    const canvas = frozenCanvasEl;
+    if (!canvas || canvas.width === 0) { loupeUrl = ''; return; }
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / (rect.width || 1);
+    const scaleY = canvas.height / (rect.height || 1);
+    const cx = Math.floor((pickX - rect.left) * scaleX);
+    const cy = Math.floor((pickY - rect.top) * scaleY);
+    const size = 40;
+    // Magnification follows the wheel-selected zoom (2x–16x), in image pixels.
+    const srcSize = Math.max(1, size / loupeZoom);
+    const loupe = document.createElement('canvas');
+    loupe.width = size;
+    loupe.height = size;
+    const context = loupe.getContext('2d');
+    if (!context) return;
+    context.imageSmoothingEnabled = false;
+    context.drawImage(canvas, cx - srcSize / 2, cy - srcSize / 2, srcSize, srcSize, 0, 0, size, size);
+    loupeUrl = loupe.toDataURL();
+  }
+
+  /** Copies the picked color in the selected format and closes the overlay. */
+  async function commitPickedColor() {
+    const color = pickColorAt(pickX, pickY);
+    if (!color) { onClose(); return; }
+    const value = formatColor(color, pickFormat);
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {}
+    isPickingColor = false;
+    onColorPicker(value);
+    onClose();
+  }
+
+  function handleLoupeWheel(e: WheelEvent) {
+    // Keep Ctrl+wheel from leaking into browser/app page zoom. The handler
+    // is bound on both the window and the overlay div, so stop propagation
+    // to avoid applying one notch twice.
+    e.stopPropagation();
+    if (e.ctrlKey || e.metaKey) e.preventDefault();
+    loupeZoom = wheelLoupeZoom(loupeZoom, e.deltaY, e.ctrlKey || e.metaKey);
+    renderLoupe();
+  }
 
   // Drag-to-snip interaction state
   let isDragging = $state(false);
@@ -293,6 +371,14 @@
     const target = e.target as HTMLElement;
     if (target.closest('.floating-pill')) return;
 
+    // Phase 15: in the picker, left-click copies the color and closes.
+    if (isPickingColor) {
+      pickX = e.clientX;
+      pickY = e.clientY;
+      void commitPickedColor();
+      return;
+    }
+
     if (isSnipMenuOpen || isDelayMenuOpen) {
       isSnipMenuOpen = false;
       isDelayMenuOpen = false;
@@ -338,6 +424,14 @@
   }
 
   function handleMouseMove(e: MouseEvent) {
+    // Phase 15: the loupe follows the pointer while picking.
+    if (isPickingColor) {
+      pickX = e.clientX;
+      pickY = e.clientY;
+      renderLoupe();
+      return;
+    }
+
     if (isDraggingPill) {
       pillX = Math.max(10, Math.min(window.innerWidth - 300, e.clientX - dragOffset.x));
       pillY = Math.max(8, Math.min(window.innerHeight - 60, e.clientY - dragOffset.y));
@@ -478,24 +572,16 @@
     executeFullscreenCapture();
   }
 
-  async function handleColorPickerClick() {
-    if (typeof window !== 'undefined' && 'EyeDropper' in window) {
-      try {
-        // @ts-ignore
-        const eyeDropper = new window.EyeDropper();
-        const result = await eyeDropper.open();
-        if (result?.sRGBHex) {
-          await navigator.clipboard.writeText(result.sRGBHex);
-          onColorPicker(result.sRGBHex);
-          onClose();
-        }
-      } catch {
-        // Cancelled by user
-      }
-    } else {
-      onColorPicker();
-      executeFullscreenCapture();
-    }
+  // Phase 15: the eyedropper enters the loupe picker: circular magnifying
+  // cursor, Ctrl+wheel zoom, format toggle, click to copy and close.
+  function handleColorPickerClick() {
+    isPickingColor = true;
+    isSnipMenuOpen = false;
+    isDelayMenuOpen = false;
+  }
+
+  function exitColorPicker() {
+    isPickingColor = false;
   }
 
   function handleTextActionsClick() {
@@ -508,9 +594,12 @@
   onpointerdown={handleWindowPointerDown}
   onmousemove={active ? handleMouseMove : undefined}
   onmouseup={active ? handleMouseUp : undefined}
+  onwheel={isPickingColor ? handleLoupeWheel : undefined}
   onkeydown={(e) => {
     if (e.key === 'Escape') {
-      if (isSnipMenuOpen || isDelayMenuOpen) {
+      if (isPickingColor) {
+        exitColorPicker();
+      } else if (isSnipMenuOpen || isDelayMenuOpen) {
         isSnipMenuOpen = false;
         isDelayMenuOpen = false;
       } else if (active) {
@@ -525,12 +614,13 @@
   <!-- Fullscreen Dimming Overlay & Drag Surface -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
-    class="fixed inset-0 z-50 select-none cursor-crosshair overflow-hidden"
+    class="fixed inset-0 z-50 select-none overflow-hidden"
     class:opacity-0={!visible}
-    style="cursor: crosshair !important;"
+    style={isPickingColor ? 'cursor: none !important;' : 'cursor: crosshair !important;'}
     onmousedown={handleMouseDown}
     onmousemove={handleMouseMove}
     onmouseup={handleMouseUp}
+    onwheel={isPickingColor ? handleLoupeWheel : undefined}
   >
     <!-- Frozen display screenshot layer -->
     {#if frameSrc || frameBitmap}
@@ -765,10 +855,11 @@
       <!-- Vertical divider -->
       <div class="w-[1px] h-4 bg-black/[0.1] dark:bg-white/[0.1] mx-0.5"></div>
 
-      <!-- 5. Color Picker Tool (Eyedropper) -->
+      <!-- 5. Color Picker Tool (Eyedropper, Phase 15) -->
       <button
         type="button"
-        class="w-8 h-8 rounded-[6px] hover:bg-black/[0.05] dark:hover:bg-white/[0.06] flex items-center justify-center text-neutral-700 dark:text-neutral-200 transition-colors cursor-pointer"
+        aria-pressed={isPickingColor}
+        class="w-8 h-8 rounded-[6px] hover:bg-black/[0.05] dark:hover:bg-white/[0.06] flex items-center justify-center transition-colors cursor-pointer {isPickingColor ? 'bg-[#0067c0] text-white' : 'text-neutral-700 dark:text-neutral-200'}"
         onclick={handleColorPickerClick}
         title="Color picker"
       >
@@ -816,6 +907,39 @@
       >
         <X class="w-4 h-4 stroke-[1.8]" />
       </button>
+    </div>
+  </div>
+{/if}
+
+<!-- Phase 15: circular magnifying loupe following the pointer -->
+{#if isPickingColor}
+  {@const picked = pickColorAt(pickX, pickY)}
+  <div
+    class="fixed z-[60] pointer-events-none -translate-x-1/2 -translate-y-1/2"
+    style="left: {pickX}px; top: {pickY}px;"
+    data-testid="color-picker-loupe"
+  >
+    <div class="relative rounded-full border-2 border-white shadow-[0_8px_32px_rgba(0,0,0,0.5)] overflow-hidden bg-black" style="width: 144px; height: 144px;">
+      {#if loupeUrl}
+        <img src={loupeUrl} alt="" class="absolute inset-0 h-full w-full" style="image-rendering: pixelated;" />
+      {/if}
+      <div class="absolute left-1/2 top-1/2 h-4 w-px -translate-x-1/2 -translate-y-1/2 bg-white/80"></div>
+      <div class="absolute left-1/2 top-1/2 h-px w-4 -translate-x-1/2 -translate-y-1/2 bg-white/80"></div>
+    </div>
+    <!-- Format toggle + picked value -->
+    <div class="absolute left-1/2 top-full mt-2 flex -translate-x-1/2 items-center gap-1 rounded-full bg-black/85 px-2 py-1 text-[11px] font-mono text-white shadow-lg pointer-events-auto" role="group" aria-label="Color format" tabindex="-1" onpointerdown={(e) => e.stopPropagation()}>
+      {#each COLOR_PICKER_FORMATS as fmt}
+        <button
+          type="button"
+          aria-pressed={pickFormat === fmt}
+          class="rounded px-1.5 py-0.5 {pickFormat === fmt ? 'bg-white text-black' : 'text-white/70 hover:text-white'}"
+          onclick={() => { pickFormat = fmt; }}
+        >
+          {fmt}
+        </button>
+      {/each}
+      <span class="ml-1">{picked ? formatColor(picked, pickFormat) : ''}</span>
+      <span class="text-white/50">· {loupeZoom}x</span>
     </div>
   </div>
 {/if}

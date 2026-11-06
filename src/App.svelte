@@ -26,9 +26,23 @@
   import { initTiming, mark } from './lib/timing';
   import { playTimerChime } from './lib/audio';
   import { clampZoom, zoomIn, zoomOut } from './lib/viewport';
+  import { clampHighlighterSize } from './lib/highlighter';
   import { copyImageToClipboard } from './lib/clipboard';
   import { settings } from './lib/settings.svelte';
   import { applyCaptureOutline } from './lib/outline';
+  import { normalizeTouchWriting } from './lib/touch-writing';
+  import { HistoryStack, copySnapshot, type HistorySnapshot } from './lib/history';
+  import { SHAPE_DEFAULT_FILL, SHAPE_DEFAULT_OUTLINE, SHAPE_DEFAULT_WIDTH, clampShapeWidth } from './lib/shapes';
+  import {
+    buildSaveFileName,
+    downloadBlob,
+    encodeCanvasToFormat,
+    isValidSaveFormat,
+    saveFormatsForImage,
+    type SaveFormat,
+  } from './lib/file-ops';
+  import { handoffFileName, sharePayload } from './lib/handoff';
+  import type { DraftingTool } from './lib/drafting';
   import { applySystemShortcuts, readSystemShortcuts, syncGlobalShortcuts } from './lib/global-shortcuts';
 
   // Svelte 5 Runes State
@@ -120,18 +134,104 @@
     } catch {}
   }
 
-  let activeTool = $state<ToolType>('pen');
+  // Phase 8: the Touch Writing toggle is independent of the markup tool.
+  // Older sessions stored Touch Writing as the `touch` tool selection;
+  // normalizeTouchWriting migrates that representation.
+  const rawSavedTool: string | null = typeof localStorage !== 'undefined' ? localStorage.getItem('sniplex_tool') : null;
+  const rawStoredToggle = typeof localStorage !== 'undefined' ? localStorage.getItem('sniplex_touch_writing') === '1' : false;
+  const migrated = normalizeTouchWriting((rawSavedTool as ToolType | 'touch' | null) ?? 'pen', rawStoredToggle);
+  let activeTool = $state<ToolType>(migrated.activeTool);
+  let touchWritingEnabled = $state(migrated.touchWritingEnabled);
+
+  $effect(() => {
+    try {
+      localStorage.setItem('sniplex_tool', activeTool);
+      localStorage.setItem('sniplex_touch_writing', touchWritingEnabled ? '1' : '0');
+    } catch {}
+  });
   let penColor = $state('#0078d4');
   let penSize = $state(3);
   let penOpacity = $state(100);
   let highlighterColor = $state('#ffeb3b');
   let highlighterSize = $state(18);
   let shapeKind = $state<ShapeKind>('rectangle');
+  // Phase 13: selected shape style and the armed emoji stamp.
+  let shapeOutlineColor = $state(SHAPE_DEFAULT_OUTLINE);
+  let shapeFillColor = $state(SHAPE_DEFAULT_FILL);
+  let shapeStrokeWidth = $state(SHAPE_DEFAULT_WIDTH);
+  let emojiGlyph = $state<string | null>(null);
+  // Phase 18: active drafting overlay.
+  let draftingTool = $state<DraftingTool>('off');
   let zoom = $state(100);
   let isCropping = $state(false);
 
   // Canvas viewport handoff for zoom, fit, and composited exports.
   let canvasArea = $state<CanvasAreaApi | null>(null);
+
+  // Phase 9: reversible edit history (pen / highlighter / eraser strokes).
+  // One stack per tab, so switching tabs never loses a document's undo.
+  const historyByTab = new Map<string, HistoryStack>();
+  let history = new HistoryStack();
+  let lastHistoryTabId = '';
+  function historyForTab(tabId: string): HistoryStack {
+    let existing = historyByTab.get(tabId);
+    if (!existing) {
+      existing = new HistoryStack();
+      historyByTab.set(tabId, existing);
+    }
+    return existing;
+  }
+  // Reactive mirror of the stack, refreshed on every mutation so the
+  // toolbar always reflects the real state.
+  let historyState = $state({
+    canUndo: false,
+    canRedo: false,
+    undoLabel: null as string | null,
+    redoLabel: null as string | null,
+  });
+  function refreshHistoryState() {
+    historyState = {
+      canUndo: history.canUndo,
+      canRedo: history.canRedo,
+      undoLabel: history.nextUndoLabel,
+      redoLabel: history.nextRedoLabel,
+    };
+  }
+  const canUndo = $derived(historyState.canUndo);
+  const canRedo = $derived(historyState.canRedo);
+  const undoLabel = $derived(historyState.undoLabel);
+  const redoLabel = $derived(historyState.redoLabel);
+
+  function handleHistoryPush(label: string, before: HistorySnapshot, after: HistorySnapshot) {
+    history.push(label, copySnapshot(before), copySnapshot(after));
+    refreshHistoryState();
+  }
+
+  // Phase 11: Erase all ink — clears annotations, keeps the capture,
+  // and stays reversible via Undo.
+  function handleEraseAllInk() {
+    if (!canvasArea) return;
+    canvasArea.eraseAllInk();
+    announce('All ink erased');
+  }
+
+  function handleUndo() {
+    const snapshot = history.undo();
+    if (snapshot && canvasArea) {
+      canvasArea.restoreSnapshot(snapshot.data, snapshot.width, snapshot.height, snapshot.model);
+      announce(`Undid ${history.nextRedoLabel ?? 'edit'}`);
+    }
+    refreshHistoryState();
+  }
+
+  function handleRedo() {
+    const snapshot = history.redo();
+    if (snapshot && canvasArea) {
+      canvasArea.restoreSnapshot(snapshot.data, snapshot.width, snapshot.height, snapshot.model);
+      announce(`Redid ${history.nextUndoLabel ?? 'edit'}`);
+    }
+    refreshHistoryState();
+  }
 
   // Clipboard synchronization state.
   let autoCopy = $derived(settings.autoCopy);
@@ -190,17 +290,36 @@
     reader.readAsDataURL(file);
   }
 
+  // Phase 16: print the composite capture through the system dialog.
   function handlePrint() {
     window.print();
   }
 
+  // Phase 16: Save As — encodes the composite to PNG/JPG/GIF/MP4.
+  let saveDialogOpen = $state(false);
+  let saveFormat = $state<SaveFormat>('png');
+
   function handleSave() {
-    const canvas = document.querySelector('canvas');
+    if (!activeTab) return;
+    saveDialogOpen = true;
+  }
+
+  async function confirmSave() {
+    if (!activeTab || !canvasArea) return;
+    const canvas = canvasArea.compositeCanvas();
     if (!canvas) return;
-    const link = document.createElement('a');
-    link.download = `Sniplex_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.png`;
-    link.href = canvas.toDataURL('image/png');
-    link.click();
+    const format: SaveFormat = isValidSaveFormat(saveFormat) ? saveFormat : 'png';
+    const blob = await encodeCanvasToFormat(canvas, format);
+    if (!blob) {
+      announce('Could not encode the image for saving');
+      showCopyToast(false, 'Could not save the image');
+      return;
+    }
+    const fileName = buildSaveFileName(activeTab.title, format);
+    downloadBlob(blob, fileName);
+    saveDialogOpen = false;
+    announce(`Saved as ${fileName}`);
+    showCopyToast(true, `Saved as ${fileName}`);
   }
 
   function captureFileName(): string {
@@ -261,13 +380,76 @@
     }, 60);
   }
 
-  function showCopyToast(ok: boolean) {
-    copyToast = { message: ok ? 'Copied to clipboard' : 'Copy failed', ok };
+  function showCopyToast(ok: boolean, message?: string) {
+    copyToast = { message: message ?? (ok ? 'Copied to clipboard' : 'Copy failed'), ok };
     if (copyToastTimer) clearTimeout(copyToastTimer);
     copyToastTimer = window.setTimeout(() => {
       copyToast = null;
       copyToastTimer = null;
     }, 2200);
+  }
+
+  // Phase 17: Share — hands the composite to the native share sheet,
+  // falling back to the clipboard (reported honestly) and then a download.
+  async function handleShare() {
+    if (!activeTab || !canvasArea) return;
+    const blob = await canvasArea.exportPngBlob();
+    if (!blob) {
+      announce('Could not share image');
+      showCopyToast(false);
+      return;
+    }
+    const outcome = await sharePayload({ title: handoffFileName(activeTab.title, '.png'), mime: 'image/png', blob });
+    if (outcome === 'native') {
+      announce('Shared image');
+      showCopyToast(true, 'Shared image');
+    } else if (outcome === 'clipboard') {
+      announce('Image copied to clipboard (share unavailable)');
+      showCopyToast(true, 'Copied to clipboard');
+    } else {
+      // Fallback: offer the file as a download so the handoff still lands.
+      downloadBlob(blob, handoffFileName(activeTab.title, '.png'));
+      announce('Shared image saved as download');
+      showCopyToast(true, 'Saved as download');
+    }
+  }
+
+  // Phase 17: Edit in External Editor — saves a handoff copy and opens it.
+  async function handleOpenExternalEditor() {
+    if (!activeTab || !canvasArea) return;
+    const blob = await canvasArea.exportPngBlob();
+    if (!blob) {
+      announce('Could not open external editor');
+      showCopyToast(false);
+      return;
+    }
+    const fileName = handoffFileName(activeTab.title, '.png');
+    if (isTauriEnvironment()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const buffer = await blob.arrayBuffer();
+        await invoke('open_in_external_editor', { fileName, bytes: Array.from(new Uint8Array(buffer)) });
+        announce('Opened in external editor');
+        showCopyToast(true, 'Opened in external editor');
+        return;
+      } catch (err) {
+        console.warn('External editor handoff failed:', err);
+        announce('Could not open the external editor');
+        showCopyToast(false, 'Could not open the editor');
+        return;
+      }
+    }
+    downloadBlob(blob, fileName);
+    announce(`Saved ${fileName} — open it in your editor`);
+    showCopyToast(true, `Saved ${fileName}`);
+  }
+
+  // Phase 17: Edit in External Video Editor. Screen recording (Phase 24) is
+  // not implemented in this build, so there is never a recording to hand off.
+  // Say so instead of pretending a handoff happened.
+  async function handleOpenExternalVideoEditor() {
+    announce('Screen recording is not available in this build yet');
+    showCopyToast(false, 'Recording unavailable');
   }
 
   /** Copies the flattened composite bitmap from the editor canvas. */
@@ -300,6 +482,13 @@
   }
 
   function handleCanvasImageReady() {
+    // A new document starts with an empty stack; switching back to a tab
+    // restores that tab's own undo history.
+    if (activeTabId && activeTabId !== lastHistoryTabId) {
+      history = activeTabId ? historyForTab(activeTabId) : new HistoryStack();
+      lastHistoryTabId = activeTabId;
+    }
+    refreshHistoryState();
     if (!pendingAutoCopy) return;
     pendingAutoCopy = false;
     if (autoCopy) void copyComposite();
@@ -339,6 +528,8 @@
   }
 
   function handleCloseTab(id: string) {
+    historyByTab.delete(id);
+    if (lastHistoryTabId === id) lastHistoryTabId = '__closed__';
     tabs = tabs.filter((t) => t.id !== id);
     if (tabs.length === 0) {
       view = 'empty';
@@ -1109,6 +1300,19 @@
       return;
     }
 
+    // Phase 9: Ctrl+Z / Ctrl+Y walk the reversible edit history.
+    if (hasImageTab && modifier && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      handleUndo();
+      return;
+    }
+
+    if (hasImageTab && modifier && e.key.toLowerCase() === 'y') {
+      e.preventDefault();
+      handleRedo();
+      return;
+    }
+
     // Ctrl + C: copy the flattened composite bitmap
     if (hasImageTab && modifier && e.key.toLowerCase() === 'c') {
       e.preventDefault();
@@ -1157,8 +1361,8 @@
       onModeChange={handleOverlayModeChange}
       onSnipTypeChange={handleOverlaySnipTypeChange}
       onDelayChange={handleOverlayDelayChange}
-      onScreenDraw={() => {}}
-      onTextActions={() => {}}
+      onScreenDraw={() => { activeTool = 'pen'; }}
+      onTextActions={() => { activeTool = 'text'; }}
       onColorPicker={() => {}}
     />
   </div>
@@ -1188,9 +1392,29 @@
         {highlighterColor}
         {highlighterSize}
         {shapeKind}
+        {shapeOutlineColor}
+        {shapeFillColor}
+        {shapeStrokeWidth}
+        {emojiGlyph}
+        onShapeOutlineChange={(c) => shapeOutlineColor = c}
+        onShapeFillChange={(c) => shapeFillColor = c}
+        onShapeWidthChange={(w) => shapeStrokeWidth = clampShapeWidth(w)}
+        onEmojiSelect={(glyph) => emojiGlyph = glyph}
         {zoom}
         hasImage={view === 'editor' && tabs.length > 0}
+        {touchWritingEnabled}
+        {canUndo}
+        {canRedo}
+        {undoLabel}
+        {redoLabel}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
         {isCropping}
+        onTouchWritingChange={(enabled) => {
+          touchWritingEnabled = enabled;
+          try { localStorage.setItem('sniplex_touch_writing', enabled ? '1' : '0'); } catch {}
+          announce(enabled ? 'Touch writing on — one finger draws' : 'Touch writing off — one finger pans');
+        }}
         onTriggerNew={handleTriggerNew}
         onTriggerOcr={handleTriggerOcr}
         onModeChange={handleModeChange}
@@ -1201,23 +1425,26 @@
         onPenSizeChange={(s) => penSize = s}
         onPenOpacityChange={(o) => penOpacity = o}
         onHighlighterColorChange={(c) => highlighterColor = c}
-        onHighlighterSizeChange={(s) => highlighterSize = s}
+        onHighlighterSizeChange={(s) => highlighterSize = clampHighlighterSize(s)}
         onShapeKindChange={(s) => shapeKind = s}
         onZoomCommand={handleZoomCommand}
         onZoomChange={(z) => zoom = clampZoom(z)}
         onSave={handleSave}
         onCopy={() => { void copyComposite(); }}
+        hasVideo={mode === 'record'}
+        onShare={handleShare}
+        onOpenExternalEditor={handleOpenExternalEditor}
+        onOpenExternalVideoEditor={handleOpenExternalVideoEditor}
+        draftingTool={draftingTool}
+        onDraftingChange={(tool) => {
+          draftingTool = tool;
+          announce(tool === 'off' ? 'Drafting tools off' : `${tool === 'ruler' ? 'Ruler' : 'Protractor'} shown`);
+        }}
         onOpenSettings={() => view = 'settings'}
         onOpenFile={handleOpenFile}
         onPrint={handlePrint}
         onToggleCrop={() => isCropping = !isCropping}
-        onClearAll={() => {
-          const canvas = document.querySelector('canvas');
-          if (canvas) {
-            const ctx = canvas.getContext('2d');
-            if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
-          }
-        }}
+        onClearAll={handleEraseAllInk}
       />
 
       <!-- 3. Main Body View (Canvas, Empty, or Settings) -->
@@ -1241,12 +1468,20 @@
           {penOpacity}
           {highlighterColor}
           {highlighterSize}
+          {shapeKind}
+          {shapeOutlineColor}
+          {shapeFillColor}
+          {shapeStrokeWidth}
+          {emojiGlyph}
+          draftingTool={draftingTool}
+          {touchWritingEnabled}
           {isCropping}
           onApplyCrop={() => isCropping = false}
           onCancelCrop={() => isCropping = false}
           onZoomChange={handleCanvasZoom}
           onImageReady={handleCanvasImageReady}
           onCanvasMutated={handleCanvasMutated}
+          onHistoryPush={handleHistoryPush}
         />
       {/if}
 
@@ -1278,10 +1513,34 @@
           onTextActions={() => {
             activeTool = 'text';
           }}
-          onColorPicker={(color) => {
-            if (color) penColor = color;
-          }}
+          onColorPicker={() => {}}
         />
+      {/if}
+
+      <!-- Phase 16: Save As dialog (PNG / JPG / GIF for captures) -->
+      {#if saveDialogOpen && activeTab}
+        <div class="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label="Save as" tabindex="-1" onpointerdown={(e) => { if (e.target === e.currentTarget) saveDialogOpen = false; }}>
+          <div class="w-80 rounded-xl border border-black/10 bg-white p-4 shadow-xl dark:border-white/10 dark:bg-[#181d28]">
+            <h2 class="text-sm font-semibold text-neutral-800 dark:text-neutral-100">Save as</h2>
+            <div class="mt-1 text-xs text-neutral-500 dark:text-neutral-400">{activeTab.title} · {activeTab.width}×{activeTab.height}</div>
+            <div class="mt-3 grid grid-cols-3 gap-1.5" role="group" aria-label="Save format">
+              {#each saveFormatsForImage() as fmt}
+                <button
+                  type="button"
+                  aria-pressed={saveFormat === fmt}
+                  class="rounded-md border px-2 py-1.5 text-xs font-medium uppercase transition-colors {saveFormat === fmt ? 'border-[#0067c0] bg-[#0067c0] text-white' : 'border-black/10 text-neutral-700 hover:bg-black/5 dark:border-white/10 dark:text-neutral-200 dark:hover:bg-white/10'}"
+                  onclick={() => saveFormat = fmt}
+                >
+                  {fmt}
+                </button>
+              {/each}
+            </div>
+            <div class="mt-4 flex justify-end gap-2">
+              <button type="button" class="rounded-md px-3 py-1.5 text-xs text-neutral-600 hover:bg-black/5 dark:text-neutral-300 dark:hover:bg-white/10" onclick={() => saveDialogOpen = false}>Cancel</button>
+              <button type="button" class="rounded-md bg-[#0067c0] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#1070c7]" onclick={confirmSave}>Save</button>
+            </div>
+          </div>
+        </div>
       {/if}
 
       <!-- Clipboard confirmation toast -->

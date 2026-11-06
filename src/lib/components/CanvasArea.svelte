@@ -5,6 +5,60 @@
   import { pixelLinePoints } from '../drawing';
   import { detectHeldShape, type HeldShape, type StrokePoint } from '../hold-snap';
   import { registerPinchBridge, type PinchPhase } from '../pinch';
+  import { isFingerMarkupTool, touchActionFor } from '../touch-writing';
+  import { HIGHLIGHTER_ALPHA, constrainStraightLine } from '../highlighter';
+  import { ERASER_BRUSH_SIZE } from '../eraser';
+  import type { EditorModel, MarkupOp } from '../markup';
+  import {
+    cloneEditorModel,
+    cloneMarkupOps,
+    createMarkupOpId,
+    hitTestOp,
+    opIntersectsRect,
+    translateOp,
+  } from '../markup';
+  import type { HistorySnapshot } from '../history';
+  import TextEditorBar from './TextEditorBar.svelte';
+  import {
+    clampTextSize,
+    createTextLabel,
+    estimateTextWidth,
+    hitTextLabel,
+    isCommittableText,
+    labelHeight,
+    labelLineHeight,
+    labelWidth,
+    textLines,
+    type TextAlign,
+    type TextLabel,
+  } from '../text-label';
+  import DraftingOverlay from './DraftingOverlay.svelte';
+  import {
+    PROTRACTOR_RADIUS,
+    PROTRACTOR_SNAP_DISTANCE,
+    RULER_SNAP_DISTANCE,
+    rulerProjection,
+    shouldSnapToProtractor,
+    shouldSnapToRuler,
+    type DraftingTool,
+  } from '../drafting';
+  import {
+    fullCropRect,
+    isEffectiveCrop,
+    resizeCropRect,
+    type CropHandle,
+    type CropRect,
+  } from '../crop';
+  import type { ShapeKind } from '../types';
+  import {
+    EMOJI_DEFAULT_SIZE,
+    SHAPE_DEFAULT_FILL,
+    SHAPE_DEFAULT_OUTLINE,
+    clampShapeWidth,
+    constrainShapeEnd,
+    shapeBounds,
+    type ShapeGeometry,
+  } from '../shapes';
   import {
     MAX_ZOOM,
     ZOOM_SLIDER_STEPS,
@@ -29,12 +83,20 @@
     penOpacity = 100,
     highlighterColor = '#ffeb3b',
     highlighterSize = 18,
+    shapeKind = 'rectangle',
+    shapeOutlineColor = SHAPE_DEFAULT_OUTLINE,
+    shapeFillColor = SHAPE_DEFAULT_FILL,
+    shapeStrokeWidth = 3,
+    emojiGlyph = null,
+    draftingTool = 'off',
+    touchWritingEnabled = false,
     isCropping = false,
     onApplyCrop = () => {},
     onCancelCrop = () => {},
     onZoomChange = (z: number) => {},
     onImageReady = () => {},
     onCanvasMutated = () => {},
+    onHistoryPush = (_label: string, _before: HistorySnapshot, _after: HistorySnapshot) => {},
   }: {
     imageUrl: string;
     width?: number;
@@ -46,12 +108,29 @@
     penOpacity: number;
     highlighterColor: string;
     highlighterSize: number;
+    /** Phase 13: selected shape and its outline/fill style. */
+    shapeKind: ShapeKind;
+    shapeOutlineColor: string;
+    shapeFillColor: string;
+    shapeStrokeWidth: number;
+    /** Phase 13: armed emoji stamp glyph, if any. */
+    emojiGlyph: string | null;
+    /** Phase 18: active drafting overlay (ruler / protractor / off). */
+    draftingTool: DraftingTool;
+    /** Phase 8 toggle: one finger inks when on, pans when off. */
+    touchWritingEnabled: boolean;
     isCropping: boolean;
     onApplyCrop: () => void;
     onCancelCrop: () => void;
     onZoomChange?: (z: number) => void;
     onImageReady?: () => void;
     onCanvasMutated?: () => void;
+    /** Phase 9: fired when a committed stroke should enter history. */
+    onHistoryPush?: (
+      label: string,
+      before: HistorySnapshot,
+      after: HistorySnapshot
+    ) => void;
   } = $props();
 
   let viewportEl = $state<HTMLDivElement | null>(null);
@@ -69,10 +148,436 @@
   let strokePoints: StrokePoint[] = [];
   let strokeSnapped: HeldShape | null = null;
   let holdTimer: number | null = null;
+  // Phase 9: snapshot taken when the current edit began, pushed as the
+  // history `before` state when the edit commits.
+  let strokeStartSnapshot: HistorySnapshot | null = null;
+  // Phase 12: snapshot taken when a label drag/commit started.
+  let textStrokeSnapshot: HistorySnapshot | null = null;
+
+  // Phase 18: draggable drafting overlay position and rotation.
+  let draftingX = $state(200);
+  let draftingY = $state(200);
+  let draftingAngle = $state(0);
+
+  // Phase 14: the active crop frame (full canvas by default, reset on load).
+  let cropRect = $state<CropRect>(fullCropRect(960, 540));
+  let cropDrag: { handle: CropHandle; startClientX: number; startClientY: number; original: CropRect } | null = null;
+
+  /** Phase 14: resets the crop frame to the full canvas. */
+  function resetCropFrame() {
+    cropRect = fullCropRect(canvasWidth, canvasHeight);
+  }
+
+  /** Phase 14: begins resizing the crop frame from one handle. */
+  function beginCropDrag(handle: CropHandle, e: PointerEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    cropDrag = { handle, startClientX: e.clientX, startClientY: e.clientY, original: cropRect };
+    capturePointer(e.pointerId);
+  }
+
+  /**
+   * Phase 14: applies the crop. Re-renders from the *pristine* source cropped
+   * to the frame plus translated markup ops, through history — so undo keeps
+   * the pre-crop canvas alive and the cropped base stays truly pristine.
+   */
+  function applyCrop() {
+    if (!ctx || !canvasEl) { onApplyCrop(); return; }
+    const rect = cropRect;
+    if (rect.width <= 0 || rect.height <= 0) { onApplyCrop(); return; }
+    // A full-canvas frame changes nothing — close without a history entry.
+    if (!isEffectiveCrop(rect, canvasWidth, canvasHeight)) {
+      resetCropFrame();
+      onApplyCrop();
+      return;
+    }
+
+    const before = captureSnapshot();
+
+    const croppedSource = document.createElement('canvas');
+    croppedSource.width = Math.max(1, Math.round(rect.width));
+    croppedSource.height = Math.max(1, Math.round(rect.height));
+    const croppedCtx = croppedSource.getContext('2d');
+    if (croppedCtx && sourceImage) {
+      croppedCtx.drawImage(
+        sourceImage,
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        0,
+        0,
+        croppedSource.width,
+        croppedSource.height
+      );
+    } else if (croppedCtx) {
+      croppedCtx.fillStyle = '#ffffff';
+      croppedCtx.fillRect(0, 0, croppedSource.width, croppedSource.height);
+    }
+
+    canvasWidth = croppedSource.width;
+    canvasHeight = croppedSource.height;
+    sourceImage = croppedSource;
+    canvasEl.width = canvasWidth;
+    canvasEl.height = canvasHeight;
+    ops = ops
+      .filter((op) => opIntersectsRect(op, rect))
+      .map((op) => translateOp(op, -rect.x, -rect.y));
+
+    sizeInkCanvas();
+    resetCropFrame();
+    cropDrag = null;
+    renderComposite();
+
+    const after = captureSnapshot();
+    if (before && after) onHistoryPush?.('crop image', before, after);
+    onCanvasMutated();
+    onApplyCrop();
+  }
+
+  // Markup ops — the single source of truth for committed ink. Undo/Redo,
+  // the eraser, crop and label/emoji edits all re-render from this list.
+  let ops = $state<MarkupOp[]>([]);
+  // Phase 13: the emoji op selected for move/resize/rotate.
+  let selectedEmojiId = $state<string | null>(null);
+  // Phase 13: drag state for the selected emoji's bounding frame.
+  let emojiDrag: {
+    id: string;
+    mode: 'move' | 'scale' | 'rotate';
+    startX: number;
+    startY: number;
+    original: { x: number; y: number; size: number; rotation: number };
+  } | null = null;
+  // Phase 11/13: live path of the stroke currently being drawn.
+  let currentStrokePath: { x: number; y: number }[] = [];
+
+  // Phase 13: in-progress drag-drawn shape (live preview on the ink overlay).
+  let shapeDrag: ShapeGeometry | null = null;
+
+  /** Drawable when the shapes tool is active and no emoji stamp is armed. */
+  function isShapeDragActive(): boolean {
+    return activeTool === 'shapes' && !emojiGlyph;
+  }
+
+  /** Draws one committed shape onto a 2d context (image coordinates). */
+  function drawShape(target: CanvasRenderingContext2D, shape: ShapeGeometry) {
+    const bounds = shapeBounds(shape);
+    target.save();
+    target.strokeStyle = shape.outlineColor;
+    target.lineWidth = clampShapeWidth(shape.strokeWidth);
+    target.lineJoin = 'round';
+    target.lineCap = 'round';
+
+    if (shape.fillColor !== 'transparent') {
+      target.fillStyle = shape.fillColor;
+      if (shape.kind === 'rectangle') {
+        target.fillRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+      } else if (shape.kind === 'oval') {
+        target.beginPath();
+        target.ellipse((bounds.left + bounds.right) / 2, (bounds.top + bounds.bottom) / 2, Math.max(0.5, (bounds.right - bounds.left) / 2), Math.max(0.5, (bounds.bottom - bounds.top) / 2), 0, 0, Math.PI * 2);
+        target.fill();
+      }
+    }
+
+    if (shape.kind === 'rectangle') {
+      target.strokeRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+    } else if (shape.kind === 'oval') {
+      target.beginPath();
+      target.ellipse((bounds.left + bounds.right) / 2, (bounds.top + bounds.bottom) / 2, Math.max(0.5, (bounds.right - bounds.left) / 2), Math.max(0.5, (bounds.bottom - bounds.top) / 2), 0, 0, Math.PI * 2);
+      target.stroke();
+    } else if (shape.kind === 'line') {
+      target.beginPath();
+      target.moveTo(shape.start.x, shape.start.y);
+      target.lineTo(shape.end.x, shape.end.y);
+      target.stroke();
+    } else if (shape.kind === 'arrow') {
+      target.beginPath();
+      target.moveTo(shape.start.x, shape.start.y);
+      target.lineTo(shape.end.x, shape.end.y);
+      target.stroke();
+      const angle = Math.atan2(shape.end.y - shape.start.y, shape.end.x - shape.start.x);
+      const head = Math.max(12, clampShapeWidth(shape.strokeWidth) * 4);
+      target.beginPath();
+      target.moveTo(shape.end.x, shape.end.y);
+      target.lineTo(shape.end.x - Math.cos(angle - 0.5) * head, shape.end.y - Math.sin(angle - 0.5) * head);
+      target.moveTo(shape.end.x, shape.end.y);
+      target.lineTo(shape.end.x - Math.cos(angle + 0.5) * head, shape.end.y - Math.sin(angle + 0.5) * head);
+      target.stroke();
+    }
+    target.restore();
+  }
+
+  /** Redraws the live shape preview on the ink overlay. */
+  function redrawShapePreview() {
+    if (!inkCtx) return;
+    clearInk();
+    if (shapeDrag) drawShape(inkCtx, shapeDrag);
+  }
+
+  /** Draws one committed markup op onto a 2d context (image coordinates). */
+  function drawMarkupOp(target: CanvasRenderingContext2D, op: MarkupOp) {
+    switch (op.type) {
+      case 'stroke': {
+        target.save();
+        if (op.snapped) {
+          drawHeldShape(target, op.snapped, op.color, Math.max(1, op.size));
+        } else if (op.tool === 'pen') {
+          target.globalAlpha = op.opacity;
+          if (op.size <= 1) drawPixelStroke(target, op.points, op.color);
+          else drawSmoothPath(target, op.points, op.color, Math.max(1, op.size));
+        } else {
+          // Highlighter: translucent, multiply-blended, square-cap chisel strokes.
+          target.globalAlpha = HIGHLIGHTER_ALPHA;
+          target.globalCompositeOperation = 'multiply';
+          target.strokeStyle = op.color;
+          target.lineWidth = op.size;
+          target.lineCap = 'square';
+          target.lineJoin = 'round';
+          if (op.points.length === 1) {
+            const p = op.points[0];
+            target.beginPath();
+            target.moveTo(p.x - 0.01, p.y);
+            target.lineTo(p.x + 0.01, p.y);
+            target.stroke();
+          }
+          for (let i = 1; i < op.points.length; i += 1) {
+            target.beginPath();
+            target.moveTo(op.points[i - 1].x, op.points[i - 1].y);
+            target.lineTo(op.points[i].x, op.points[i].y);
+            target.stroke();
+          }
+        }
+        target.restore();
+        return;
+      }
+      case 'shape':
+        drawShape(target, op.shape);
+        return;
+      case 'emoji': {
+        target.save();
+        target.translate(op.x, op.y);
+        target.rotate(op.rotation);
+        target.font = `${op.size}px 'Segoe UI Emoji', 'Apple Color Emoji', sans-serif`;
+        target.textAlign = 'center';
+        target.textBaseline = 'middle';
+        target.fillText(op.glyph, 0, 0);
+        target.restore();
+        return;
+      }
+      case 'label':
+        drawTextLabel(target, op.label);
+        return;
+    }
+  }
+
+  /** Re-renders the composite from the pristine source plus all markup ops. */
+  function renderComposite() {
+    if (!ctx || !canvasEl) return;
+    if (canvasEl.width !== canvasWidth) canvasEl.width = canvasWidth;
+    if (canvasEl.height !== canvasHeight) canvasEl.height = canvasHeight;
+    if (sourceImage) {
+      ctx.drawImage(sourceImage, 0, 0, canvasWidth, canvasHeight);
+    } else {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+    }
+    for (const op of ops) drawMarkupOp(ctx, op);
+  }
+
+  /** Stamps an emoji glyph onto the composite, through history. */
+  function stampEmoji(glyph: string, x: number, y: number) {
+    if (!ctx) return;
+    const before = captureSnapshot();
+    const op: MarkupOp = {
+      type: 'emoji',
+      id: createMarkupOpId('emoji'),
+      glyph,
+      x,
+      y,
+      size: EMOJI_DEFAULT_SIZE,
+      rotation: 0,
+    };
+    ops = [...ops, op];
+    selectedEmojiId = op.id;
+    renderComposite();
+    const after = captureSnapshot();
+    if (before && after) onHistoryPush?.('emoji stamp', before, after);
+    onCanvasMutated();
+  }
+
+  /** Markup tools whose strokes the eraser registers for hit-testing. */
+  function enabledMarkupPath(tool: ToolType): boolean {
+    return tool === 'pen' || tool === 'highlighter';
+  }
+
+  /**
+   * Phase 11: vector eraser. Removes every markup op the brush touches —
+   * whole elements, never brush-sized fragments — and re-renders.
+   * Returns true when at least one element was removed.
+   */
+  function eraseOpsAt(point: { x: number; y: number }): boolean {
+    const hits = ops.filter((op) => hitTestOp(op, point, ERASER_BRUSH_SIZE / 2));
+    if (hits.length === 0) return false;
+    const hitIds = new Set(hits.map((op) => op.id));
+    ops = ops.filter((op) => !hitIds.has(op.id));
+    if (selectedEmojiId && hitIds.has(selectedEmojiId)) selectedEmojiId = null;
+    renderComposite();
+    return true;
+  }
+
+  /**
+   * Sweeps the brush from one move point to the next, sampling along the
+   * segment so a fast swipe can't tunnel through a thin element.
+   */
+  function eraseOpsAlongSegment(from: { x: number; y: number }, to: { x: number; y: number }): boolean {
+    const distance = Math.hypot(to.x - from.x, to.y - from.y);
+    const step = Math.max(1, ERASER_BRUSH_SIZE / 2);
+    const steps = Math.max(1, Math.ceil(distance / step));
+    let erased = false;
+    for (let i = 1; i <= steps; i += 1) {
+      const point = {
+        x: from.x + ((to.x - from.x) * i) / steps,
+        y: from.y + ((to.y - from.y) * i) / steps,
+      };
+      if (eraseOpsAt(point)) erased = true;
+    }
+    return erased;
+  }
+
+  /** Phase 13: scaled selection for the emoji bounding-frame overlay. */
+  const selectedEmojiOp = $derived(
+    ops.find((op) => op.type === 'emoji' && op.id === selectedEmojiId) ?? null
+  );
+
+  /** Phase 13: live drag of the selected emoji (move / scale / rotate). */
+  function updateEmojiDrag(clientX: number, clientY: number) {
+    if (!emojiDrag) return;
+    const point = clientToImage(clientX, clientY);
+    const op = ops.find((o) => o.id === emojiDrag!.id);
+    if (!op || op.type !== 'emoji') return;
+    const original = emojiDrag.original;
+
+    if (emojiDrag.mode === 'move') {
+      const dx = point.x - emojiDrag.startX;
+      const dy = point.y - emojiDrag.startY;
+      ops = ops.map((o) =>
+        o.id === op.id && o.type === 'emoji' ? { ...o, x: original.x + dx, y: original.y + dy } : o
+      );
+    } else if (emojiDrag.mode === 'scale') {
+      const startDist = Math.hypot(emojiDrag.startX - original.x, emojiDrag.startY - original.y);
+      const nowDist = Math.hypot(point.x - original.x, point.y - original.y);
+      if (startDist > 1) {
+        const size = Math.max(8, Math.min(512, original.size * (nowDist / startDist)));
+        ops = ops.map((o) =>
+          o.id === op.id && o.type === 'emoji' ? { ...o, size } : o
+        );
+      }
+    } else {
+      const angleStart = Math.atan2(emojiDrag.startY - original.y, emojiDrag.startX - original.x);
+      const angleNow = Math.atan2(point.y - original.y, point.x - original.x);
+      ops = ops.map((o) =>
+        o.id === op.id && o.type === 'emoji' ? { ...o, rotation: original.rotation + (angleNow - angleStart) } : o
+      );
+    }
+    renderComposite();
+  }
+
+  /** Phase 13: begins a bounding-frame drag from one of its handles. */
+  function beginEmojiDrag(mode: 'move' | 'scale' | 'rotate', e: PointerEvent) {
+    const op = selectedEmojiOp;
+    if (!op || op.type !== 'emoji') return;
+    e.preventDefault();
+    e.stopPropagation();
+    const point = clientToImage(e.clientX, e.clientY);
+    emojiDrag = {
+      id: op.id,
+      mode,
+      startX: point.x,
+      startY: point.y,
+      original: { x: op.x, y: op.y, size: op.size, rotation: op.rotation },
+    };
+    capturePointer(e.pointerId);
+  }
+
+  // Phase 12: inline editor state for the label currently being typed, plus
+  // typography state. Committed labels live in `ops`.
+  let editingLabel = $state<TextLabel | null>(null);
+  let textFontSize = $state(24);
+  let textColor = $state('#000000');
+  let textAlign = $state<TextAlign>('left');
+  let textDrag: {
+    id: string;
+    startX: number;
+    startY: number;
+    originalX: number;
+    originalY: number;
+    moved: boolean;
+  } | null = null;
+  let textInputEl = $state<HTMLTextAreaElement | null>(null);
+
+  /** Draws one text label onto a 2d context at image-pixel coordinates. */
+  function drawTextLabel(target: CanvasRenderingContext2D, label: TextLabel) {
+    target.save();
+    target.fillStyle = label.color;
+    target.font = `${label.fontSize}px 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif`;
+    target.textAlign = 'left';
+    target.textBaseline = 'top';
+    const width = labelWidth(label);
+    const lineHeight = labelLineHeight(label.fontSize);
+    for (const [index, line] of textLines(label.text).entries()) {
+      const lineWidth = estimateTextWidth(label.fontSize, line);
+      const offset =
+        label.align === 'center'
+          ? (width - lineWidth) / 2
+          : label.align === 'right'
+            ? width - lineWidth
+            : 0;
+      target.fillText(line, label.x + offset, label.y + index * lineHeight);
+    }
+    target.restore();
+  }
+
+  function commitEditing() {
+    if (!editingLabel || !ctx) {
+      editingLabel = null;
+      return;
+    }
+    const label = editingLabel;
+    editingLabel = null;
+    const opIndex = ops.findIndex((op) => op.type === 'label' && op.label.id === label.id);
+    const existed = opIndex >= 0;
+    const before = textStrokeSnapshot;
+
+    if (isCommittableText(label.text)) {
+      const updated: MarkupOp = { type: 'label', id: label.id, label };
+      ops = existed ? ops.map((op, i) => (i === opIndex ? updated : op)) : [...ops, updated];
+      renderComposite();
+      const after = captureSnapshot();
+      if (before && after) onHistoryPush?.('text label', before, after);
+      onCanvasMutated();
+      return;
+    }
+
+    if (existed) {
+      // Erasing the whole label (emptied it) is a real, reversible edit.
+      ops = ops.filter((op) => !(op.type === 'label' && op.label.id === label.id));
+      renderComposite();
+      const after = captureSnapshot();
+      if (before && after) onHistoryPush?.('text label', before, after);
+      onCanvasMutated();
+    }
+    // A brand-new blank label is simply dropped — nothing to record.
+  }
 
   // Navigation state: Space or the middle mouse button drags the view.
   let pointerInside = $state(false);
   let spaceHeld = $state(false);
+  // Phase 10: keyboard modifiers tracked so highlighter drawing can
+  // request a Shift-locked straight line at move time.
+  let shiftHeld = $state(false);
+  // Anchor of an in-progress highlighter stroke (image coordinates).
+  let highlightAnchorX = 0;
+  let highlightAnchorY = 0;
   let isPanning = $state(false);
   let panPointerId: number | null = null;
   let panStartX = 0;
@@ -118,9 +623,9 @@
   let panCursor = $derived(spaceHeld);
 
   let imageLoadToken = 0;
-  // Pristine capture kept aside so the eraser can restore the untouched pixels
-  // under the brush instead of leaving transparent holes in the screenshot.
-  let sourceImage: HTMLImageElement | null = null;
+  // Pristine capture kept aside; the composite is re-rendered from it plus
+  // the markup op list whenever anything changes.
+  let sourceImage: CanvasImageSource | null = null;
 
   onMount(() => {
     canvasWidth = width || 960;
@@ -129,7 +634,7 @@
       canvasEl.width = canvasWidth;
       canvasEl.height = canvasHeight;
       ctx = canvasEl.getContext('2d');
-      renderCanvas();
+      renderComposite();
     }
     sizeInkCanvas();
 
@@ -171,10 +676,19 @@
             ctx = context;
             canvasEl.width = canvasWidth;
             canvasEl.height = canvasHeight;
-            context.drawImage(img, 0, 0);
           }
         }
+        // A fresh document: drop every bit of prior editing state.
+        ops = [];
+        selectedEmojiId = null;
+        editingLabel = null;
+        textDrag = null;
+        emojiDrag = null;
+        strokeStartSnapshot = null;
+        textStrokeSnapshot = null;
         sizeInkCanvas();
+        resetCropFrame();
+        renderComposite();
         onImageReady();
       };
       img.src = url;
@@ -182,6 +696,13 @@
       canvasWidth = width || 960;
       canvasHeight = height || 540;
       sourceImage = null;
+      ops = [];
+      selectedEmojiId = null;
+      editingLabel = null;
+      textDrag = null;
+      emojiDrag = null;
+      strokeStartSnapshot = null;
+      textStrokeSnapshot = null;
       if (canvasEl) {
         const context = ctx || canvasEl.getContext('2d');
         if (context) {
@@ -191,7 +712,9 @@
         }
       }
       sizeInkCanvas();
-      renderCanvas();
+      resetCropFrame();
+      renderComposite();
+      onImageReady();
     }
   });
 
@@ -203,13 +726,8 @@
     clearInk();
   }
 
-  function renderCanvas() {
-    if (!ctx || !canvasEl) return;
-    if (!imageUrl) {
-      // Clean white canvas for new markup
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, canvasWidth, canvasHeight);
-    }
+  function currentModel(): EditorModel {
+    return cloneEditorModel({ sourceImage, width: canvasWidth, height: canvasHeight, ops });
   }
 
   function isTypingTarget(target: EventTarget | null): boolean {
@@ -225,6 +743,11 @@
   }
 
   function handleWindowKeyDown(e: KeyboardEvent) {
+    if (e.key === 'Shift') shiftHeld = true;
+    if (e.key === 'Escape') {
+      selectedEmojiId = null;
+      return;
+    }
     if (e.code !== 'Space' && e.key !== ' ') return;
     if (!pointerInside || isTypingTarget(e.target)) return;
     spaceHeld = true;
@@ -232,6 +755,7 @@
   }
 
   function handleWindowKeyUp(e: KeyboardEvent) {
+    if (e.key === 'Shift') shiftHeld = false;
     if (e.code === 'Space' || e.key === ' ') {
       spaceHeld = false;
     }
@@ -239,6 +763,7 @@
 
   function resetInputState() {
     spaceHeld = false;
+    shiftHeld = false;
     finishStroke();
     stopPan();
     touchGesture = null;
@@ -324,17 +849,15 @@
   function isMarkupTool(): boolean {
     return (
       activeTool === 'pen' ||
-      activeTool === 'touch' ||
       activeTool === 'highlighter' ||
-      activeTool === 'eraser'
+      activeTool === 'eraser' ||
+      activeTool === 'text' ||
+      activeTool === 'shapes'
     );
   }
 
   function usesPixelBrush(): boolean {
-    return (
-      (activeTool === 'pen' || activeTool === 'touch') &&
-      Math.max(1, Math.round(penSize)) <= 1
-    );
+    return activeTool === 'pen' && Math.max(1, Math.round(penSize)) <= 1;
   }
 
   function penAlpha(): number {
@@ -513,7 +1036,7 @@
     holdTimer = window.setTimeout(() => {
       holdTimer = null;
       if (!isDrawing || strokeSnapped) return;
-      if (activeTool !== 'pen' && activeTool !== 'touch') return;
+      if (activeTool !== 'pen') return;
 
       const shape = detectHeldShape(strokePoints);
       if (!shape) return;
@@ -544,54 +1067,119 @@
   }
 
   /**
-   * The eraser belongs to the annotations, not the screenshot: it paints the
-   * untouched capture back over everything under the brush, which removes ink
-   * while keeping the original pixels intact.
+   * Phase 18: magnetic snap onto the active ruler or protractor arc.
+   * Scoped to pen/highlighter only. The snap radii are specified in display
+   * pixels, so they are converted into image pixels using the current zoom.
    */
-  function eraseSegment(
-    fromX: number,
-    fromY: number,
-    toX: number,
-    toY: number,
-    lineWidth: number
-  ) {
-    if (!ctx) return;
-
-    const radius = Math.max(1, lineWidth / 2);
-    const distance = Math.hypot(toX - fromX, toY - fromY);
-    const steps = Math.max(1, Math.ceil(distance / Math.max(1, radius / 2)));
-
-    ctx.save();
-    ctx.beginPath();
-    for (let step = 0; step <= steps; step += 1) {
-      const progress = step / steps;
-      const x = fromX + (toX - fromX) * progress;
-      const y = fromY + (toY - fromY) * progress;
-      ctx.moveTo(x + radius, y);
-      ctx.arc(x, y, radius, 0, Math.PI * 2);
+  function snapDraftingPoint(point: { x: number; y: number }): { x: number; y: number } {
+    if (activeTool !== 'pen' && activeTool !== 'highlighter') return point;
+    const scale = zoom / 100;
+    const rulerThreshold = RULER_SNAP_DISTANCE / scale;
+    const protractorThreshold = PROTRACTOR_SNAP_DISTANCE / scale;
+    if (draftingTool === 'ruler' && shouldSnapToRuler({ x: draftingX, y: draftingY }, draftingAngle, point, rulerThreshold)) {
+      return rulerProjection({ x: draftingX, y: draftingY }, draftingAngle, point).projected;
     }
-    ctx.clip();
-
-    if (sourceImage) {
-      ctx.drawImage(sourceImage, 0, 0, canvasWidth, canvasHeight);
-    } else {
-      // No capture to restore: leave the blank canvas the annotations sat on.
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+    if (draftingTool === 'protractor' && shouldSnapToProtractor({ x: draftingX, y: draftingY }, PROTRACTOR_RADIUS, point, protractorThreshold)) {
+      const angleFromCenter = Math.atan2(point.y - draftingY, point.x - draftingX);
+      return {
+        x: draftingX + Math.cos(angleFromCenter) * PROTRACTOR_RADIUS,
+        y: draftingY + Math.sin(angleFromCenter) * PROTRACTOR_RADIUS,
+      };
     }
-    ctx.restore();
+    return point;
   }
 
-  function startStrokeAt(clientX: number, clientY: number) {
+  function startStrokeAt(clientX: number, clientY: number, viaTouch = false) {
     if (!ctx || !canvasEl || !isMarkupTool()) return;
+    if (viaTouch && activeTool === 'eraser') return;
 
-    const point = clientToImage(clientX, clientY);
+    // History: snapshot the composite before this stroke touches it.
+    strokeStartSnapshot = captureSnapshot();
+    // Phase 13: an armed emoji stamps on click (no drag).
+    if (activeTool === 'shapes' && emojiGlyph && !isCropping) {
+      const point = clientToImage(clientX, clientY);
+      stampEmoji(emojiGlyph, point.x, point.y);
+      return;
+    }
+    // Phase 13: clicking an existing emoji selects it for move/resize/rotate.
+    if (activeTool === 'shapes' && !emojiGlyph && !isCropping) {
+      const point = clientToImage(clientX, clientY);
+      const hit = [...ops].reverse().find((op) => op.type === 'emoji' && hitTestOp(op, point, 4));
+      if (hit && hit.type === 'emoji') {
+        strokeStartSnapshot = captureSnapshot();
+        selectedEmojiId = hit.id;
+        isDrawing = true;
+        didStroke = false;
+        emojiDrag = {
+          id: hit.id,
+          mode: 'move',
+          startX: point.x,
+          startY: point.y,
+          original: { x: hit.x, y: hit.y, size: hit.size, rotation: hit.rotation },
+        };
+        return;
+      }
+      selectedEmojiId = null;
+    }
+    // Phase 12: clicking an existing label selects it for dragging/editing
+    // instead of inking a new stroke over it.
+    if (activeTool === 'text' && !isCropping) {
+      const point = clientToImage(clientX, clientY);
+      const hit = ops.find((op) => op.type === 'label' && hitTextLabel(op.label, point.x, point.y));
+      if (hit && hit.type === 'label') {
+        // Start a potential drag; finishing without movement reopens the editor.
+        textStrokeSnapshot = captureSnapshot();
+        const label = hit.label;
+        textDrag = { id: label.id, startX: point.x, startY: point.y, originalX: label.x, originalY: label.y, moved: false };
+        return;
+      }
+      // No label here: open the inline text editor at this spot.
+      textStrokeSnapshot = captureSnapshot();
+      const label = createTextLabel({
+        text: '',
+        x: point.x,
+        y: point.y,
+        fontSize: clampTextSize(textFontSize),
+        color: textColor,
+        align: textAlign,
+      });
+      editingLabel = label;
+      return;
+    }
+
+    // Snap the stroke's first point too, so the initial segment doesn't
+    // kink from an unsnapped anchor to snapped points.
+    const point = snapDraftingPoint(clientToImage(clientX, clientY));
     isDrawing = true;
     didStroke = false;
     lastX = point.x;
     lastY = point.y;
+    highlightAnchorX = point.x;
+    highlightAnchorY = point.y;
+    currentStrokePath = enabledMarkupPath(activeTool) ? [{ x: point.x, y: point.y }] : [];
 
-    if (activeTool === 'pen' || activeTool === 'touch') {
+    // Phase 11: the eraser hit-tests the brush against markup ops, removing
+    // whole elements (vector, undoable). Checked after `didStroke` resets so
+    // the flag survives.
+    if (activeTool === 'eraser') {
+      if (eraseOpsAt(point)) didStroke = true;
+    }
+
+    // Phase 13: a shapes drag starts a live shape preview.
+    if (isShapeDragActive()) {
+      shapeDrag = {
+        kind: shapeKind,
+        start: { x: point.x, y: point.y },
+        end: { x: point.x, y: point.y },
+        outlineColor: shapeOutlineColor,
+        fillColor: shapeFillColor,
+        strokeWidth: clampShapeWidth(shapeStrokeWidth),
+      };
+      didStroke = true;
+      redrawShapePreview();
+    }
+
+    if (activeTool === 'pen') {
       strokePoints = [{ x: point.x, y: point.y }];
       strokeSnapped = null;
       clearInk();
@@ -602,13 +1190,63 @@
   }
 
   function drawStrokeTo(clientX: number, clientY: number) {
+    // Phase 13: bounding-frame drag for the selected emoji.
+    if (emojiDrag) {
+      updateEmojiDrag(clientX, clientY);
+      return;
+    }
+
+    // Phase 14: dragging a crop handle resizes the crop frame.
+    if (cropDrag) {
+      const imagePoint = clientToImage(clientX, clientY);
+      const startPoint = clientToImage(cropDrag.startClientX, cropDrag.startClientY);
+      cropRect = resizeCropRect(
+        cropDrag.original,
+        cropDrag.handle,
+        imagePoint.x - startPoint.x,
+        imagePoint.y - startPoint.y,
+        canvasWidth,
+        canvasHeight
+      );
+      return;
+    }
+
+    // Phase 13: live shape preview while dragging.
+    if (shapeDrag && isDrawing) {
+      const point = clientToImage(clientX, clientY);
+      shapeDrag = {
+        ...shapeDrag,
+        end: constrainShapeEnd(shapeDrag.start, point, shapeDrag.kind, shiftHeld),
+      };
+      redrawShapePreview();
+      return;
+    }
+
+    // Phase 12: dragging a committed label moves it live.
+    if (textDrag) {
+      const point = clientToImage(clientX, clientY);
+      const op = ops.find((o) => o.type === 'label' && o.label.id === textDrag!.id);
+      if (op && op.type === 'label') {
+        const movedLabel = {
+          ...op.label,
+          x: textDrag.originalX + (point.x - textDrag.startX),
+          y: textDrag.originalY + (point.y - textDrag.startY),
+        };
+        textDrag.moved = true;
+        ops = ops.map((o) => (o.id === op.id && o.type === 'label' ? { ...o, label: movedLabel } : o));
+        renderComposite();
+      }
+      return;
+    }
+
     if (!isDrawing || !ctx || !canvasEl) return;
 
-    const point = clientToImage(clientX, clientY);
+    let point = snapDraftingPoint(clientToImage(clientX, clientY));
 
-    if (activeTool === 'pen' || activeTool === 'touch') {
+    if (activeTool === 'pen') {
       const wasSnapped = strokeSnapped !== null;
       strokePoints.push({ x: point.x, y: point.y });
+      currentStrokePath.push({ x: point.x, y: point.y });
       didStroke = true;
 
       if (wasSnapped) {
@@ -624,47 +1262,159 @@
 
       scheduleHoldSnap();
     } else if (activeTool === 'highlighter') {
+      // Phase 10: Shift constrains the stroke to a horizontal/vertical line
+      // through its anchor; otherwise the freehand chisel stroke applies.
+      let endX = point.x;
+      let endY = point.y;
+      if (shiftHeld) {
+        const constrained = constrainStraightLine(
+          { x: highlightAnchorX, y: highlightAnchorY },
+          { x: point.x, y: point.y }
+        );
+        endX = constrained.x;
+        endY = constrained.y;
+      }
+      ctx.save();
+      ctx.globalAlpha = HIGHLIGHTER_ALPHA;
       ctx.globalCompositeOperation = 'multiply';
-      strokeSegment(
-        lastX,
-        lastY,
-        point.x,
-        point.y,
-        highlighterColor,
-        highlighterSize,
-        'square'
-      );
-      ctx.globalCompositeOperation = 'source-over';
+      strokeSegment(lastX, lastY, endX, endY, highlighterColor, highlighterSize, 'square');
+      ctx.restore();
+      currentStrokePath.push({ x: endX, y: endY });
+      lastX = endX;
+      lastY = endY;
       didStroke = true;
     } else if (activeTool === 'eraser') {
-      eraseSegment(lastX, lastY, point.x, point.y, 20);
-      didStroke = true;
+      if (eraseOpsAlongSegment({ x: lastX, y: lastY }, point)) didStroke = true;
     }
 
-    lastX = point.x;
-    lastY = point.y;
+    // Highlighter already advanced lastX/lastY to the constrained endpoint.
+    if (activeTool !== 'highlighter') {
+      lastX = point.x;
+      lastY = point.y;
+    }
   }
 
   function finishStroke() {
     clearHoldTimer();
-    const isPenStroke = activeTool === 'pen' || activeTool === 'touch';
+    const isPenStroke = activeTool === 'pen';
+
+    // Phase 13: commit the bounding-frame drag (move / scale / rotate).
+    if (emojiDrag) {
+      const drag = emojiDrag;
+      emojiDrag = null;
+      const op = ops.find((o) => o.id === drag.id);
+      const changed =
+        op && op.type === 'emoji' &&
+        (op.x !== drag.original.x || op.y !== drag.original.y || op.size !== drag.original.size || op.rotation !== drag.original.rotation);
+      if (changed) {
+        const before = strokeStartSnapshot;
+        const after = captureSnapshot();
+        if (before && after) onHistoryPush?.('emoji transform', before, after);
+        onCanvasMutated();
+      }
+      strokeStartSnapshot = null;
+      return;
+    }
+
+    // Phase 12: a drag that moved a label commits it to history;
+    // a press that never moved reopens the label editor.
+    if (textDrag) {
+      const drag = textDrag;
+      textDrag = null;
+      const op = ops.find((o) => o.type === 'label' && o.label.id === drag.id);
+      if (!op || op.type !== 'label') return;
+      if (drag.moved) {
+        const before = textStrokeSnapshot;
+        const after = captureSnapshot();
+        if (before && after) onHistoryPush?.('move text label', before, after);
+        onCanvasMutated();
+      } else {
+        textStrokeSnapshot = captureSnapshot();
+        editingLabel = { ...op.label };
+      }
+      return;
+    }
+
+    // History label for the stroke that just committed. Shapes push their
+    // entry in the commit block below instead of this generic path.
+    const committed =
+      isDrawing && didStroke && (isPenStroke || activeTool === 'highlighter' || activeTool === 'eraser')
+        ? activeTool === 'pen'
+          ? 'pen stroke'
+          : activeTool === 'highlighter'
+            ? 'highlight stroke'
+            : 'erase'
+        : null;
+
+    // Phase 13: commit the dragged shape as an op, through history.
+    // Only a click with no movement (zero extent) creates no shape.
+    const hasShapeExtent =
+      shapeDrag !== null &&
+      Math.hypot(shapeDrag.end.x - shapeDrag.start.x, shapeDrag.end.y - shapeDrag.start.y) > 0;
+    if (isDrawing && didStroke && hasShapeExtent && activeTool === 'shapes' && !emojiGlyph && shapeDrag && ctx && inkEl) {
+      const before = strokeStartSnapshot;
+      const shape = shapeDrag;
+      ops = [...ops, { type: 'shape', id: createMarkupOpId('shape'), shape }];
+      renderComposite();
+      clearInk();
+      const after = captureSnapshot();
+      if (before && after) onHistoryPush?.('shape', before, after);
+      shapeDrag = null;
+      onCanvasMutated();
+    }
 
     if (isDrawing && isPenStroke && inkEl && ctx && strokePoints.length > 0) {
-      if (strokeSnapped) redrawInk();
-
-      // The whole stroke is composited once, so a translucent pen never builds
-      // up darker patches where the path crosses itself.
-      ctx.save();
-      ctx.globalAlpha = penAlpha();
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.drawImage(inkEl, 0, 0);
-      ctx.restore();
+      if (didStroke) {
+        ops = [
+          ...ops,
+          {
+            type: 'stroke',
+            id: createMarkupOpId('stroke'),
+            tool: 'pen',
+            points: currentStrokePath.map((point) => ({ ...point })),
+            color: penColor,
+            size: Math.max(1, Math.round(penSize)),
+            opacity: penAlpha(),
+            snapped: strokeSnapped,
+          },
+        ];
+        renderComposite();
+        onCanvasMutated();
+      }
       clearInk();
-
-      if (didStroke) onCanvasMutated();
+    } else if (isDrawing && didStroke && activeTool === 'highlighter') {
+      // The composite already holds the ink (drawn incrementally); push the
+      // op and re-render deterministically so all tools share one model.
+      ops = [
+        ...ops,
+        {
+          type: 'stroke',
+          id: createMarkupOpId('stroke'),
+          tool: 'highlighter',
+          points: currentStrokePath.map((point) => ({ ...point })),
+          color: highlighterColor,
+          size: highlighterSize,
+          opacity: 1,
+          snapped: null,
+        },
+      ];
+      renderComposite();
+      onCanvasMutated();
     } else if (isDrawing && didStroke) {
       onCanvasMutated();
     }
+
+    // Phase 13: the shape commit above already pushed its history entry.
+    if (committed && strokeStartSnapshot) {
+      const afterSnapshot = captureSnapshot();
+      if (afterSnapshot) {
+        onHistoryPush?.(committed, strokeStartSnapshot, afterSnapshot);
+      }
+    }
+
+    strokeStartSnapshot = null;
+    currentStrokePath = [];
+    if (activeTool === 'shapes') { shapeDrag = null; clearInk(); }
 
     isDrawing = false;
     didStroke = false;
@@ -830,6 +1580,10 @@
   function handleViewportPointerDown(e: PointerEvent) {
     if (!viewportEl) return;
 
+    // Phase 14: viewport presses never ink while a crop is active; only
+    // the frame handles (which stop propagation) move the rectangle.
+    if (isCropping) return;
+
     if (e.pointerType === 'touch') {
       e.preventDefault();
       touchPoints.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -838,9 +1592,16 @@
       if (touchPoints.size === 1) {
         if (suppressSingleTouch) return;
 
-        // Touch Writing draws with one finger; otherwise one finger pans.
-        if (activeTool === 'touch' && !isCropping && isInsideCanvas(e.clientX, e.clientY)) {
-          startStrokeAt(e.clientX, e.clientY);
+        // Phase 8: one finger inks (active pen/highlighter) when the
+        // Touch Writing toggle is on; otherwise it pans the viewport.
+        const action = touchActionFor({
+          activeTool,
+          touchWritingEnabled,
+          isCropping,
+          insideCanvas: isInsideCanvas(e.clientX, e.clientY),
+        });
+        if (action === 'draw' && isFingerMarkupTool(activeTool)) {
+          startStrokeAt(e.clientX, e.clientY, true);
         } else {
           startPan(e.clientX, e.clientY, e.pointerId);
         }
@@ -877,6 +1638,11 @@
 
   function handleViewportPointerMove(e: PointerEvent) {
     if (e.pointerType === 'touch') {
+      if (emojiDrag || cropDrag) {
+        e.preventDefault();
+        drawStrokeTo(e.clientX, e.clientY);
+        return;
+      }
       if (!touchPoints.has(e.pointerId)) return;
       touchPoints.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
@@ -894,6 +1660,11 @@
         e.preventDefault();
         panTo(e.clientX, e.clientY);
       }
+      return;
+    }
+
+    if (emojiDrag || cropDrag) {
+      drawStrokeTo(e.clientX, e.clientY);
       return;
     }
 
@@ -924,6 +1695,7 @@
       if (isPanning && (panPointerId === e.pointerId || touchPoints.size === 0)) {
         stopPan();
       }
+      cropDrag = null;
 
       if (touchPoints.size === 0) {
         suppressSingleTouch = false;
@@ -935,6 +1707,72 @@
 
     finishStroke();
     stopPan();
+    cropDrag = null;
+  }
+
+  /** Phase 9: captures the current editor model (and composite bitmap) for history. */
+  export function captureSnapshot(): HistorySnapshot | null {
+    if (!ctx || !canvasEl) return null;
+    return { data: new Uint8ClampedArray(0), width: canvasWidth, height: canvasHeight, model: currentModel() };
+  }
+
+  /** Phase 9: restores a history snapshot onto the composite canvas. */
+  export function restoreSnapshot(data: Uint8ClampedArray, width: number, height: number, model?: EditorModel): void {
+    if (!ctx || !canvasEl || width <= 0 || height <= 0) return;
+    if (model) {
+      sourceImage = model.sourceImage;
+      canvasWidth = model.width;
+      canvasHeight = model.height;
+      canvasEl.width = canvasWidth;
+      canvasEl.height = canvasHeight;
+      ops = cloneMarkupOps(model.ops);
+      selectedEmojiId = null;
+      editingLabel = null;
+      textDrag = null;
+      emojiDrag = null;
+      sizeInkCanvas();
+      resetCropFrame();
+      renderComposite();
+      return;
+    }
+    // Legacy bitmap path: resize first so partial/mismatched restores are exact.
+    canvasEl.width = width;
+    canvasEl.height = height;
+    canvasWidth = width;
+    canvasHeight = height;
+    if (data.length < width * height * 4) return;
+    const imageData = new ImageData(new Uint8ClampedArray(data), width, height);
+    ctx.putImageData(imageData, 0, 0);
+    clearInk();
+    sizeInkCanvas();
+    resetCropFrame();
+  }
+
+  /**
+   * Phase 11: Erase all ink. Removes every markup op — pen, highlighter,
+   * shapes, emojis, labels — while keeping the pristine capture, reversible
+   * with Undo.
+   */
+  export function eraseAllInk(): void {
+    if (!ctx || !canvasEl) return;
+    if (ops.length === 0) return;
+    const before = captureSnapshot();
+    if (!before) return;
+
+    ops = [];
+    selectedEmojiId = null;
+    didStroke = false;
+    sizeInkCanvas();
+    renderComposite();
+
+    const after = captureSnapshot();
+    if (after) onHistoryPush?.('erase all ink', before, after);
+    onCanvasMutated();
+  }
+
+  /** Returns the flattened composite canvas (base capture plus all markup). */
+  export function compositeCanvas(): HTMLCanvasElement | null {
+    return canvasEl;
   }
 
   /** Returns the flattened composite bitmap (base capture plus all markup). */
@@ -1024,6 +1862,26 @@
 </script>
 
 <div class="flex-1 relative flex flex-col overflow-hidden bg-[#e5e7eb] dark:bg-[#07090e]">
+  <!-- Phase 12: floating typography controls while a label is being edited -->
+  {#if editingLabel}
+    <TextEditorBar
+      fontSize={textFontSize}
+      color={textColor}
+      align={textAlign}
+      onFontSizeChange={(size) => {
+        textFontSize = clampTextSize(size);
+        if (editingLabel) editingLabel = { ...editingLabel, fontSize: textFontSize };
+      }}
+      onColorChange={(colorValue) => {
+        textColor = colorValue;
+        if (editingLabel) editingLabel = { ...editingLabel, color: textColor };
+      }}
+      onAlignChange={(alignValue) => {
+        textAlign = alignValue;
+        if (editingLabel) editingLabel = { ...editingLabel, align: textAlign };
+      }}
+    />
+  {/if}
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
   bind:this={viewportEl}
@@ -1066,27 +1924,90 @@
       style="width: {displayWidth}px; height: {displayHeight}px; image-rendering: {imageRendering};"
     ></canvas>
 
+    <!-- Phase 12: inline text editor (click to type, Esc / click-away commits) -->
+    {#if editingLabel}
+      {@const scale = zoom / 100}
+      <textarea
+        bind:this={textInputEl}
+        data-testid="text-label-editor"
+        value={editingLabel.text}
+        placeholder="Type label…"
+        aria-label="Text label"
+        class="absolute z-10 box-border select-text rounded-sm border border-[#0067c0] bg-transparent p-0 outline-none"
+        style="left: {editingLabel.x * scale}px; top: {editingLabel.y * scale}px; width: {Math.max(120, labelWidth(editingLabel)) * scale}px; min-height: {labelHeight(editingLabel) * scale}px; font-size: {editingLabel.fontSize * scale}px; color: {editingLabel.color}; text-align: {editingLabel.align}; font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;"
+        oninput={(e) => {
+          if (editingLabel) editingLabel = { ...editingLabel, text: (e.target as HTMLTextAreaElement).value };
+        }}
+        onkeydown={(e) => {
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            commitEditing();
+          }
+          e.stopPropagation();
+        }}
+        onblur={() => commitEditing()}
+      ></textarea>
+    {/if}
+
+    <!-- Phase 13: bounding frame for the selected emoji (move / resize / rotate) -->
+    {#if selectedEmojiOp && selectedEmojiOp.type === 'emoji' && !isCropping}
+      {@const op = selectedEmojiOp}
+      {@const scale = zoom / 100}
+      {@const box = op.size * scale}
+      <div class="absolute z-10" style="left: {op.x * scale}px; top: {op.y * scale}px;">
+        <div
+          class="absolute border-2 border-dashed border-[#0067c0] rounded-sm pointer-events-none"
+          style="width: {box}px; height: {box}px; transform: translate(-50%, -50%) rotate({op.rotation}rad);"
+        >
+          <!-- Connector line to the rotate handle -->
+          <div class="absolute left-1/2 top-0 h-5 w-px -translate-x-1/2 -translate-y-full bg-[#0067c0]"></div>
+          <div
+            class="absolute left-1/2 top-0 h-3.5 w-3.5 -translate-x-1/2 -translate-y-[calc(100%+1.1rem)] rounded-full bg-white border-2 border-[#0067c0] pointer-events-auto cursor-grab"
+            role="button"
+            aria-label="Rotate emoji"
+            tabindex="0"
+            onpointerdown={(e) => beginEmojiDrag('rotate', e)}
+          ></div>
+          <!-- 4 corner scale handles (uniform resize around the center) -->
+          <div class="absolute -top-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-nwse-resize rounded-sm" role="button" aria-label="Emoji handle" tabindex="0" onpointerdown={(e) => beginEmojiDrag('scale', e)}></div>
+          <div class="absolute -top-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-nesw-resize rounded-sm" role="button" aria-label="Emoji handle" tabindex="0" onpointerdown={(e) => beginEmojiDrag('scale', e)}></div>
+          <div class="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-nesw-resize rounded-sm" role="button" aria-label="Emoji handle" tabindex="0" onpointerdown={(e) => beginEmojiDrag('scale', e)}></div>
+          <div class="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-nwse-resize rounded-sm" role="button" aria-label="Emoji handle" tabindex="0" onpointerdown={(e) => beginEmojiDrag('scale', e)}></div>
+        </div>
+      </div>
+    {/if}
+
     <!-- Crop Overlay with 8-Handle Bounding Box -->
     {#if isCropping}
-      <div class="absolute inset-0 border-2 border-dashed border-[#0067c0] pointer-events-none">
+      {@const cropScale = zoom / 100}
+      {@const frameW = cropRect.width * cropScale}
+      {@const frameH = cropRect.height * cropScale}
+      {@const frameL = cropRect.x * cropScale}
+      {@const frameT = cropRect.y * cropScale}
+      <!-- Dim only the exterior: an even-odd clip punches a hole for the frame. -->
+      <div
+        class="absolute inset-0 bg-black/45 pointer-events-none"
+        style="clip-path: polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0, {frameL}px {frameT}px, {frameL}px {frameT + frameH}px, {frameL + frameW}px {frameT + frameH}px, {frameL + frameW}px {frameT}px)"
+      ></div>
+      <div class="absolute border-2 border-dashed border-[#0067c0] pointer-events-none" style="left: {cropRect.x * cropScale}px; top: {cropRect.y * cropScale}px; width: {frameW}px; height: {frameH}px;">
         <!-- 4 Corner Handles -->
-        <div class="absolute -top-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-nwse-resize"></div>
-        <div class="absolute -top-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-nesw-resize"></div>
-        <div class="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-nesw-resize"></div>
-        <div class="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-nwse-resize"></div>
+        <div class="absolute -top-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-nwse-resize" role="button" aria-label="Crop handle" tabindex="0" onpointerdown={(e) => beginCropDrag('nw', e)}></div>
+        <div class="absolute -top-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-nesw-resize" role="button" aria-label="Crop handle" tabindex="0" onpointerdown={(e) => beginCropDrag('ne', e)}></div>
+        <div class="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-nesw-resize" role="button" aria-label="Crop handle" tabindex="0" onpointerdown={(e) => beginCropDrag('sw', e)}></div>
+        <div class="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-nwse-resize" role="button" aria-label="Crop handle" tabindex="0" onpointerdown={(e) => beginCropDrag('se', e)}></div>
 
         <!-- 4 Edge Handles -->
-        <div class="absolute -top-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-ns-resize"></div>
-        <div class="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-ns-resize"></div>
-        <div class="absolute top-1/2 -left-1.5 -translate-y-1/2 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-ew-resize"></div>
-        <div class="absolute top-1/2 -right-1.5 -translate-y-1/2 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-ew-resize"></div>
+        <div class="absolute -top-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-ns-resize" role="button" aria-label="Crop handle" tabindex="0" onpointerdown={(e) => beginCropDrag('n', e)}></div>
+        <div class="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-ns-resize" role="button" aria-label="Crop handle" tabindex="0" onpointerdown={(e) => beginCropDrag('s', e)}></div>
+        <div class="absolute top-1/2 -left-1.5 -translate-y-1/2 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-ew-resize" role="button" aria-label="Crop handle" tabindex="0" onpointerdown={(e) => beginCropDrag('w', e)}></div>
+        <div class="absolute top-1/2 -right-1.5 -translate-y-1/2 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-ew-resize" role="button" aria-label="Crop handle" tabindex="0" onpointerdown={(e) => beginCropDrag('e', e)}></div>
 
         <!-- Floating Apply / Cancel Buttons -->
         <div class="absolute -bottom-12 left-1/2 -translate-x-1/2 flex items-center gap-1.5 bg-white dark:bg-[#181d28] border border-black/10 dark:border-white/10 rounded-full px-2 py-1 shadow-lg pointer-events-auto">
           <button
             type="button"
             class="p-1 rounded-full hover:bg-black/5 dark:hover:bg-white/10 text-emerald-600 dark:text-emerald-400 transition-colors cursor-pointer"
-            onclick={onApplyCrop}
+            onclick={() => applyCrop()}
             title="Apply Crop"
           >
             <Check class="w-4 h-4 stroke-[2.2]" />
@@ -1094,7 +2015,7 @@
           <button
             type="button"
             class="p-1 rounded-full hover:bg-black/5 dark:hover:bg-white/10 text-rose-600 dark:text-rose-400 transition-colors cursor-pointer"
-            onclick={onCancelCrop}
+            onclick={() => { resetCropFrame(); onCancelCrop(); }}
             title="Cancel Crop"
           >
             <X class="w-4 h-4 stroke-[2.2]" />
@@ -1102,6 +2023,17 @@
         </div>
       </div>
     {/if}
+
+    <!-- Phase 18: draggable ruler / protractor overlay -->
+    <DraftingOverlay
+      tool={draftingTool}
+      x={draftingX}
+      y={draftingY}
+      angle={draftingAngle}
+      scale={zoom / 100}
+      onDrag={(nx, ny) => { draftingX = nx; draftingY = ny; }}
+      onRotate={(angle) => { draftingAngle = angle; }}
+    />
   </div>
 </div>
 

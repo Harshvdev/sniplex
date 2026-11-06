@@ -1247,6 +1247,75 @@ fn save_screenshot(folder: String, file_name: String, png_base64: String) -> Res
     Ok(path.to_string_lossy().to_string())
 }
 
+/// Writes a handoff copy of the capture to a temp file and launches the
+/// desktop's default image editor on it (Edit in External Image Editor).
+/// Linux uses xdg-open; macOS uses open; other targets report an error.
+#[tauri::command]
+fn open_in_external_editor(file_name: String, bytes: Vec<u8>) -> Result<String, String> {
+    if bytes.is_empty() {
+        return Err("No image bytes were provided".to_string());
+    }
+
+    // Never let a crafted name escape the handoff directory.
+    let clean_name: String = file_name
+        .chars()
+        .filter(|character| *character != '/' && *character != '\\' && !character.is_control())
+        .collect();
+    let clean_name = if clean_name.trim().is_empty() {
+        "sniplex-capture.png".to_string()
+    } else {
+        clean_name
+    };
+
+    let directory = std::env::temp_dir().join("sniplex-handoff");
+    fs::create_dir_all(&directory).map_err(|error| {
+        format!("Failed to create {}: {}", directory.display(), error)
+    })?;
+
+    // Unique prefix so concurrent handoffs never overwrite a file an editor
+    // may still have open.
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let path = directory.join(format!("{nonce}-{clean_name}"));
+    fs::write(&path, &bytes).map_err(|error| {
+        format!("Failed to write {}: {}", path.display(), error)
+    })?;
+
+    launch_default_image_editor(&path)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn launch_default_image_editor(path: &std::path::Path) -> Result<(), String> {
+    Command::new("xdg-open")
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Failed to launch the default image editor: {error}"))
+}
+
+#[cfg(target_os = "macos")]
+fn launch_default_image_editor(path: &std::path::Path) -> Result<(), String> {
+    Command::new("open")
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Failed to launch the default image editor: {error}"))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn launch_default_image_editor(_path: &std::path::Path) -> Result<(), String> {
+    Err("Launching an external editor is not supported on this platform yet".to_string())
+}
+
 #[tauri::command]
 fn exit_app(app: tauri::AppHandle) {
     app.exit(0);
@@ -1308,6 +1377,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             select_folder,
             save_screenshot,
+            open_in_external_editor,
             capture_desktop,
             start_capture_session,
             get_capture_session,
