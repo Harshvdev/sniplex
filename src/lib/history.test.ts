@@ -77,6 +77,14 @@ describe('Phase 9: History Engine', () => {
     expect(history.nextUndoLabel).toBe('edit 199');
   });
 
+  it('replaceLastAfter rewrites the latest after-state (wet-ink amend)', () => {
+    const history = new HistoryStack();
+    history.push('shape', pixels(1), pixels(2));
+    history.replaceLastAfter(pixels(9));
+    history.undo();
+    expect(history.redo()?.data[0]).toBe(9);
+  });
+
   it('clear() empties both stacks', () => {
     const history = new HistoryStack();
     history.push('pen', pixels(1), pixels(2));

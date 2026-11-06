@@ -2,8 +2,9 @@
  * Phase 14 — Image Cropping.
  *
  * An interactive 8-handle frame trims the capture. The crop commits
- * non-destructively: the composite is re-rendered from the selected
- * rectangle and the edit enters history like any other mutation.
+ * non-destructively (Phase 9 crop-isolation rule): it does not enter
+ * history; the preserved original buffer is restored by re-entering
+ * Crop mode.
  */
 
 export interface CropRect {
@@ -15,6 +16,7 @@ export interface CropRect {
 
 /** The eight resize handles around the crop frame. */
 export type CropHandle =
+  | 'move'
   | 'nw'
   | 'n'
   | 'ne'
@@ -72,6 +74,12 @@ export function resizeCropRect(
   let nextBottom = bottom;
 
   switch (handle) {
+    case 'move':
+      nextLeft += dx;
+      nextTop += dy;
+      nextRight += dx;
+      nextBottom += dy;
+      break;
     case 'nw':
       nextLeft += dx;
       nextTop += dy;
@@ -100,6 +108,14 @@ export function resizeCropRect(
     case 'w':
       nextLeft += dx;
       break;
+  }
+
+  if (handle === 'move') {
+    const fw = width;
+    const fh = height;
+    nextLeft = Math.max(0, Math.min(nextLeft, imageWidth - fw));
+    nextTop = Math.max(0, Math.min(nextTop, imageHeight - fh));
+    return { x: nextLeft, y: nextTop, width: fw, height: fh };
   }
 
   // Keep the frame at least CROP_MIN_SIZE on every side.

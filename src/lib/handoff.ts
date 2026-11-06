@@ -1,9 +1,9 @@
 /**
- * Phase 17 — External Application Handoffs.
+ * Phase 17 — System Share.
  *
- * Share, Edit in External Image Editor, and Edit in External Video Editor.
- * Native share sheets and shell handlers are used when available; otherwise
- * the composite falls back to a download or the clipboard.
+ * Share button and canvas context menu use the native share sheet when
+ * available; otherwise the composite falls back to a clipboard copy or a
+ * download.
  */
 
 export interface HandoffPayload {
@@ -12,16 +12,9 @@ export interface HandoffPayload {
   blob: Blob;
 }
 
-export type HandoffTarget = 'share' | 'image-editor' | 'video-editor';
-
 /** True when the platform exposes the Web Share API with file support. */
 export function canNativeShare(): boolean {
   return typeof navigator !== 'undefined' && 'share' in navigator;
-}
-
-/** True when the platform can launch an external program for the file. */
-export function canOpenExternally(): boolean {
-  return typeof window !== 'undefined' && typeof window.open === 'function';
 }
 
 /** Builds the File object the share sheet expects. */

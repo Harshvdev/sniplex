@@ -7,6 +7,7 @@
     Pen,
     Highlighter,
     Eraser,
+    Ruler,
     Hand,
     Crop,
     Type,
@@ -17,7 +18,6 @@
     Save,
     Copy,
     Share2,
-    Palette,
     MoreHorizontal,
     Check,
     Settings,
@@ -28,10 +28,8 @@
     TimerOff,
   } from '@lucide/svelte';
   import SnipIcons from '../icons/SnipIcons.svelte';
-  import { Compass } from '@lucide/svelte';
   import PenFlyout from './PenFlyout.svelte';
   import HighlighterFlyout from './HighlighterFlyout.svelte';
-  import ShapesFlyout from './ShapesFlyout.svelte';
   import type { CaptureMode, SnipType, SnipDelay, ToolType, ShapeKind, ZoomCommand } from '../types';
 
   let {
@@ -41,7 +39,6 @@
     activeTool = 'pen',
     penColor = '#0078d4',
     penSize = 3,
-    penOpacity = 100,
     highlighterColor = '#ffeb3b',
     highlighterSize = 18,
     shapeKind = 'rectangle',
@@ -60,7 +57,6 @@
     onToolChange = (t: ToolType) => {},
     onPenColorChange = (c: string) => {},
     onPenSizeChange = (s: number) => {},
-    onPenOpacityChange = (o: number) => {},
     onHighlighterColorChange = (c: string) => {},
     onHighlighterSizeChange = (s: number) => {},
     onShapeKindChange = (s: ShapeKind) => {},
@@ -82,15 +78,15 @@
     onUndo = () => {},
     onRedo = () => {},
     /** Phase 17: external handoffs. */
-    hasVideo = false,
     onShare = () => {},
-    onOpenExternalEditor = () => {},
-    onOpenExternalVideoEditor = () => {},
     /** Phase 18: drafting overlay selection. */
     draftingTool = 'off',
-    onDraftingChange = (_tool: 'off' | 'ruler' | 'protractor') => {},
+    onDraftingChange = (_tool: 'off' | 'ruler') => {},
     onOpenSettings = () => {},
     onOpenFile = () => {},
+    onOpenScreenshotsFolder = () => {},
+    /** Alt-key menu opener signal from the shell. */
+    openFlyoutSignal = null,
     onToggleCrop = () => {},
     onClearAll = () => {},
     onTriggerOcr = () => {},
@@ -102,7 +98,6 @@
     activeTool: ToolType;
     penColor: string;
     penSize: number;
-    penOpacity: number;
     highlighterColor: string;
     highlighterSize: number;
     shapeKind: ShapeKind;
@@ -123,7 +118,6 @@
     onToolChange: (t: ToolType) => void;
     onPenColorChange: (c: string) => void;
     onPenSizeChange: (s: number) => void;
-    onPenOpacityChange: (o: number) => void;
     onHighlighterColorChange: (c: string) => void;
     onHighlighterSizeChange: (s: number) => void;
     onShapeKindChange: (s: ShapeKind) => void;
@@ -145,15 +139,14 @@
     onUndo: () => void;
     onRedo: () => void;
     /** Phase 17: external handoffs. */
-    hasVideo: boolean;
     onShare: () => void;
-    onOpenExternalEditor: () => void;
-    onOpenExternalVideoEditor: () => void;
     /** Phase 18: drafting overlay selection. */
-    draftingTool: 'off' | 'ruler' | 'protractor';
-    onDraftingChange: (tool: 'off' | 'ruler' | 'protractor') => void;
+    draftingTool: 'off' | 'ruler';
+    onDraftingChange: (tool: 'off' | 'ruler') => void;
     onOpenSettings: () => void;
     onOpenFile: () => void;
+    onOpenScreenshotsFolder: () => void;
+    openFlyoutSignal: { name: string; nonce: number } | null;
     onToggleCrop: () => void;
     onClearAll: () => void;
     onTriggerOcr?: () => void;
@@ -163,10 +156,21 @@
   // Active popovers
   let activeFlyout = $state<string | null>(null);
   let showCopiedToast = $state(false);
+  // Alt-key keytip badges (behavioral Surface A).
+  let showAltHints = $state(false);
 
   function toggleFlyout(name: string) {
     activeFlyout = activeFlyout === name ? null : name;
   }
+  // Shell-driven Alt-key menu openers.
+  let lastSignalNonce = $state(0);
+  $effect(() => {
+    const s = openFlyoutSignal;
+    if (s && s.nonce !== lastSignalNonce) {
+      lastSignalNonce = s.nonce;
+      activeFlyout = s.name;
+    }
+  });
 
   function handleWindowPointerDown(e: PointerEvent) {
     if (!activeFlyout) return;
@@ -202,14 +206,21 @@
   const zoomPresets = [10, 25, 50, 100, 200, 400, 800, 1600, 3200];
 
   const zoomCommands: { id: ZoomCommand; label: string; hint: string }[] = [
-    { id: 'fit', label: 'Fit to window', hint: 'Ctrl + 0' },
-    { id: 'actual', label: 'View actual size (100%)', hint: '' },
+    { id: 'fit', label: 'Fit to window', hint: 'Ctrl + 1' },
+    { id: 'actual', label: 'View actual size (100%)', hint: 'Ctrl + 0' },
   ];
 </script>
 
-<svelte:window onpointerdown={handleWindowPointerDown} onkeydown={(e) => {
-  if (e.key === 'Escape' && activeFlyout) activeFlyout = null;
-}} />
+<svelte:window
+  onpointerdown={handleWindowPointerDown}
+  onkeydown={(e) => {
+    if (e.key === 'Escape' && activeFlyout) activeFlyout = null;
+    if (e.key === 'Alt') showAltHints = true;
+  }}
+  onkeyup={(e) => {
+    if (e.key === 'Alt') showAltHints = false;
+  }}
+/>
 
 <div class="h-12 border-b border-black/[0.06] dark:border-white/[0.07] bg-[#f9fafb] dark:bg-[#161b26] flex items-center justify-between px-3 text-neutral-800 dark:text-neutral-200 select-none relative z-30 transition-colors duration-150">
   <!-- LEFT: Trigger & Modes -->
@@ -217,12 +228,13 @@
     <!-- 1. "+ New" Button -->
     <button
       type="button"
-      class="h-8 flex items-center justify-center gap-1.5 px-3 bg-[#0067c0] hover:bg-[#1070c7] active:bg-[#005fb8] text-white text-xs font-medium rounded-[6px] shadow-sm transition-colors"
+      class="h-8 flex items-center justify-center gap-1.5 px-3 bg-[#0067c0] hover:bg-[#1070c7] active:bg-[#005fb8] text-white text-xs font-medium rounded-[6px] shadow-sm transition-colors relative"
       onclick={onTriggerNew}
       title="New snip (Print Screen or Ctrl+N)"
     >
       <Plus class="w-3.5 h-3.5 stroke-[2.2]" />
       <span>New</span>
+      {#if showAltHints}<span class="absolute -top-2 left-1/2 -translate-x-1/2 rounded bg-[#0067c0] px-1 text-[8px] font-bold text-white shadow">1</span>{/if}
     </button>
 
     <!-- 2. Camera / Video Segmented Pill (Matching Reference) -->
@@ -261,6 +273,7 @@
         title="Snip mode"
       >
         <SnipIcons type={snipType} className="w-4 h-4 text-neutral-700 dark:text-neutral-300" />
+        {#if showAltHints}<span class="absolute -top-2 left-1/2 -translate-x-1/2 rounded bg-[#0067c0] px-1 text-[8px] font-bold text-white shadow">2</span>{/if}
         <ChevronDown class="w-3 h-3 text-neutral-500 stroke-[1.8]" />
       </button>
 
@@ -292,7 +305,9 @@
         class="h-8 flex items-center gap-1 px-2 rounded-[6px] hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-transparent hover:border-black/[0.05] dark:hover:border-white/[0.05] transition-colors text-xs text-neutral-700 dark:text-neutral-300"
         onclick={() => toggleFlyout('delay')}
         title={delay === 0 ? 'Snip delay (No delay)' : `Snip delay (${delay}-second delay)`}
+        style="position:relative"
       >
+        {#if showAltHints}<span class="absolute -top-2 left-1/2 -translate-x-1/2 rounded bg-[#0067c0] px-1 text-[8px] font-bold text-white shadow">3</span>{/if}
         {#if delay === 0}
           <TimerOff class="w-4 h-4 text-neutral-700 dark:text-neutral-300 stroke-[1.8]" />
         {:else}
@@ -350,6 +365,7 @@
           title="Ballpoint pen"
         >
           <Pen class="w-4 h-4 stroke-[1.8]" />
+          {#if showAltHints}<span class="absolute -top-2 left-1/2 -translate-x-1/2 rounded bg-[#0067c0] px-1 text-[8px] font-bold text-white shadow">B</span>{/if}
           <div class="w-2.5 h-2.5 rounded-full border border-black/20" style="background-color: {penColor};"></div>
           <ChevronDown class="w-3 h-3 text-neutral-500" />
         </button>
@@ -359,10 +375,8 @@
             <PenFlyout
               color={penColor}
               size={penSize}
-              opacity={penOpacity}
               onColorChange={(c) => { onPenColorChange(c); }}
               onSizeChange={(s) => { onPenSizeChange(s); }}
-              onOpacityChange={(o) => { onPenOpacityChange(o); }}
             />
           </div>
         {/if}
@@ -380,6 +394,7 @@
           title="Highlighter"
         >
           <Highlighter class="w-4 h-4 stroke-[1.8]" />
+          {#if showAltHints}<span class="absolute -top-2 left-1/2 -translate-x-1/2 rounded bg-[#0067c0] px-1 text-[8px] font-bold text-white shadow">H</span>{/if}
           <div class="w-3 h-1.5 rounded-sm" style="background-color: {highlighterColor};"></div>
           <ChevronDown class="w-3 h-3 text-neutral-500" />
         </button>
@@ -408,6 +423,7 @@
           title="Eraser"
         >
           <Eraser class="w-4 h-4 stroke-[1.8]" />
+          {#if showAltHints}<span class="absolute -top-2 left-1/2 -translate-x-1/2 rounded bg-[#0067c0] px-1 text-[8px] font-bold text-white shadow">E</span>{/if}
           <ChevronDown class="w-3 h-3 text-neutral-500" />
         </button>
 
@@ -424,54 +440,27 @@
         {/if}
       </div>
 
-      <!-- Ruler / Protractor Tool (Phase 18: dropdown overlay selector) -->
-      <div class="relative flyout-container">
-        <button
-          type="button"
-          class="w-8 h-8 rounded-[6px] flex items-center justify-center transition-colors {draftingTool !== 'off' ? 'bg-black/[0.08] dark:bg-white/[0.12] text-neutral-900 dark:text-white' : 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300'}"
-          onclick={() => toggleFlyout('drafting')}
-          title="Ruler / Protractor"
-        >
-          <Compass class="w-4 h-4 stroke-[1.8]" />
-        </button>
-
-        {#if activeFlyout === 'drafting'}
-          <div class="absolute top-full mt-1.5 left-1/2 -translate-x-1/2 z-50 min-w-[150px] bg-white dark:bg-[#181d28] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_12px_32px_rgba(0,0,0,0.45)] py-1 flex flex-col">
-            {#each [{ id: 'ruler', label: 'Ruler' }, { id: 'protractor', label: 'Protractor' }, { id: 'off', label: 'Off' }] as opt}
-              <button
-                type="button"
-                class="relative flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-left hover:bg-black/[0.05] dark:hover:bg-white/[0.06] rounded-[4px] mx-1 transition-colors text-neutral-800 dark:text-neutral-200"
-                onclick={() => { onDraftingChange(opt.id as 'off' | 'ruler' | 'protractor'); activeFlyout = null; }}
-              >
-                {#if draftingTool === opt.id}
-                  <div class="absolute left-1 w-[2.5px] h-3.5 rounded-full bg-[#0067c0] dark:bg-[#60cdff]"></div>
-                {/if}
-                <span class="ml-2">{opt.label}</span>
-              </button>
-            {/each}
-          </div>
-        {/if}
-      </div>
-
       <!-- Touch Writing Toggle (Phase 8): independent of the markup tool -->
       <button
         type="button"
         aria-pressed={touchWritingEnabled}
-        class="w-8 h-8 rounded-[6px] flex items-center justify-center transition-colors {touchWritingEnabled ? 'bg-black/[0.08] dark:bg-white/[0.12] text-neutral-900 dark:text-white' : 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300'}"
+        class="w-8 h-8 rounded-[6px] flex items-center justify-center transition-colors relative {touchWritingEnabled ? 'bg-black/[0.08] dark:bg-white/[0.12] text-neutral-900 dark:text-white' : 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300'}"
         onclick={() => onTouchWritingChange(!touchWritingEnabled)}
         title={touchWritingEnabled ? 'Touch writing on — one finger draws' : 'Touch writing off — one finger pans'}
       >
         <Hand class="w-4 h-4 stroke-[1.8]" />
+        {#if showAltHints}<span class="absolute -top-2 left-1/2 -translate-x-1/2 rounded bg-[#0067c0] px-1 text-[8px] font-bold text-white shadow">T</span>{/if}
       </button>
 
       <!-- Image Crop Tool -->
       <button
         type="button"
-        class="w-8 h-8 rounded-[6px] flex items-center justify-center transition-colors {isCropping ? 'bg-[#0067c0] text-white' : 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300'}"
+        class="w-8 h-8 rounded-[6px] flex items-center justify-center transition-colors relative {isCropping ? 'bg-[#0067c0] text-white' : 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300'}"
         onclick={onToggleCrop}
         title="Crop image"
       >
         <Crop class="w-4 h-4 stroke-[1.8]" />
+        {#if showAltHints}<span class="absolute -top-2 left-1/2 -translate-x-1/2 rounded bg-[#0067c0] px-1 text-[8px] font-bold text-white shadow">I</span>{/if}
       </button>
 
       <!-- Text Insertion Tool -->
@@ -489,36 +478,17 @@
       <div class="relative flyout-container">
         <button
           type="button"
-          class="flex items-center gap-1 px-2 py-1.5 rounded-[6px] transition-colors {activeTool === 'shapes' ? 'bg-black/[0.08] dark:bg-white/[0.12] text-neutral-900 dark:text-white' : 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300'}"
-          onclick={() => {
-            if (activeTool === 'shapes') toggleFlyout('shapes');
-            else { onToolChange('shapes'); toggleFlyout('shapes'); }
-          }}
+          class="relative flex items-center gap-1 px-2 py-1.5 rounded-[6px] transition-colors {activeTool === 'shapes' ? 'bg-black/[0.08] dark:bg-white/[0.12] text-neutral-900 dark:text-white' : 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300'}"
+          onclick={() => onToolChange(activeTool === 'shapes' ? 'select' : 'shapes')}
           title={emojiGlyph ? `Stamping ${emojiGlyph}` : 'Shapes & emojis'}
         >
           <Shapes class="w-4 h-4 stroke-[1.8]" />
+          {#if showAltHints}<span class="absolute -top-2 left-1/2 -translate-x-1/2 rounded bg-[#0067c0] px-1 text-[8px] font-bold text-white shadow">S</span>{/if}
           {#if emojiGlyph}
             <span class="text-sm leading-none">{emojiGlyph}</span>
           {/if}
-          <ChevronDown class="w-3 h-3 text-neutral-500" />
         </button>
 
-        {#if activeFlyout === 'shapes'}
-          <div class="absolute top-full mt-1.5 left-1/2 -translate-x-1/2 z-50">
-            <ShapesFlyout
-              shape={shapeKind}
-              strokeColor={shapeOutlineColor}
-              fillColor={shapeFillColor}
-              strokeWidth={shapeStrokeWidth}
-              selectedEmoji={emojiGlyph}
-              onSelectShape={(s) => { onShapeKindChange(s); onEmojiSelect(null); }}
-              onStrokeColorChange={(c) => onShapeOutlineChange(c)}
-              onFillColorChange={(c) => onShapeFillChange(c)}
-              onStrokeWidthChange={(w) => onShapeWidthChange(w)}
-              onSelectEmoji={(glyph) => onEmojiSelect(emojiGlyph === glyph ? null : glyph)}
-            />
-          </div>
-        {/if}
       </div>
 
       <div class="w-[1px] h-5 bg-black/[0.08] dark:bg-white/[0.08] mx-1"></div>
@@ -630,15 +600,6 @@
         <Share2 class="w-4 h-4 stroke-[1.8]" />
       </button>
 
-      <!-- Edit in External Editor (Phase 17) -->
-      <button
-        type="button"
-        class="w-8 h-8 rounded-[6px] flex items-center justify-center hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300 transition-colors"
-        onclick={hasVideo ? onOpenExternalVideoEditor : onOpenExternalEditor}
-        title={hasVideo ? 'Edit in external video editor' : 'Edit in external image editor'}
-      >
-        <Palette class="w-4 h-4 stroke-[1.8]" />
-      </button>
     {/if}
 
     <!-- "See More" (...) Menu -->
@@ -648,12 +609,26 @@
         class="w-8 h-8 rounded-[6px] flex items-center justify-center hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300 transition-colors"
         onclick={() => toggleFlyout('more')}
         title="See more options"
+        style="position:relative"
       >
+        {#if showAltHints}<span class="absolute -top-2 left-1/2 -translate-x-1/2 rounded bg-[#0067c0] px-1 text-[8px] font-bold text-white shadow">4</span>{/if}
         <MoreHorizontal class="w-4 h-4 stroke-[1.8]" />
       </button>
 
       {#if activeFlyout === 'more'}
         <div class="absolute top-full mt-1.5 right-0 z-50 min-w-[160px] bg-white dark:bg-[#181d28] rounded-[8px] border border-black/[0.08] dark:border-white/[0.08] shadow-[0_12px_32px_rgba(0,0,0,0.45)] py-1 flex flex-col text-neutral-800 dark:text-neutral-200">
+          {#if hasImage}
+            <button
+              type="button"
+              class="flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-left hover:bg-black/[0.05] dark:hover:bg-white/[0.06] rounded-[4px] mx-1 transition-colors"
+              onclick={() => { onDraftingChange(draftingTool === 'ruler' ? 'off' : 'ruler'); activeFlyout = null; }}
+            >
+            <Ruler class="w-3.5 h-3.5 text-neutral-500" />
+            <span>{draftingTool === 'ruler' ? 'Hide ruler' : 'Show ruler'}</span>
+            <span class="ml-auto text-[10px] font-mono text-neutral-400">Ctrl + R</span>
+            </button>
+          {/if}
+
           <button
             type="button"
             class="flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-left hover:bg-black/[0.05] dark:hover:bg-white/[0.06] rounded-[4px] mx-1 transition-colors"
@@ -663,14 +638,27 @@
             <span>Open file</span>
           </button>
 
-          <button
-            type="button"
-            class="flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-left hover:bg-black/[0.05] dark:hover:bg-white/[0.06] rounded-[4px] mx-1 transition-colors"
-            onclick={() => { onPrint(); activeFlyout = null; }}
-          >
+          {#if hasImage}
+            <button
+              type="button"
+              class="flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-left hover:bg-black/[0.05] dark:hover:bg-white/[0.06] rounded-[4px] mx-1 transition-colors"
+              onclick={() => { onOpenScreenshotsFolder(); activeFlyout = null; }}
+            >
+              <FolderOpen class="w-3.5 h-3.5 text-neutral-500" />
+              <span>Open screenshots folder</span>
+            </button>
+          {/if}
+
+          {#if hasImage}
+            <button
+              type="button"
+              class="flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-left hover:bg-black/[0.05] dark:hover:bg-white/[0.06] rounded-[4px] mx-1 transition-colors"
+              onclick={() => { onPrint(); activeFlyout = null; }}
+            >
             <Printer class="w-3.5 h-3.5 text-neutral-500" />
             <span>Print</span>
           </button>
+          {/if}
 
           <div class="w-full h-[1px] bg-black/[0.08] dark:bg-white/[0.08] my-1"></div>
 

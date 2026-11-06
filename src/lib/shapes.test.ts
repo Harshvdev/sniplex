@@ -37,6 +37,8 @@ describe('Phase 13: Geometric Shapes', () => {
       outlineColor: '#000',
       fillColor: 'transparent',
       strokeWidth: 3,
+      outlineOpacity: 1,
+      fillOpacity: 1,
     });
     expect(bounds).toEqual({ left: 10, top: 20, right: 60, bottom: 70 });
   });

@@ -20,6 +20,8 @@ export interface ShapeGeometry {
   outlineColor: string;
   fillColor: 'transparent' | string;
   strokeWidth: number;
+  outlineOpacity: number;
+  fillOpacity: number;
 }
 
 export const SHAPE_MIN_WIDTH = 1;

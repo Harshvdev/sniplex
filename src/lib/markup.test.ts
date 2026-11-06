@@ -13,6 +13,8 @@ describe('Phase 11: filled-shape erasing', () => {
         outlineColor: '#000',
         fillColor: '#ff0000',
         strokeWidth: 3,
+        outlineOpacity: 1,
+        fillOpacity: 1,
       },
     };
     expect(hitTestOp(op, { x: 50, y: 50 }, 10)).toBe(true);
@@ -29,6 +31,8 @@ describe('Phase 11: filled-shape erasing', () => {
         outlineColor: '#000',
         fillColor: '#00ff00',
         strokeWidth: 3,
+        outlineOpacity: 1,
+        fillOpacity: 1,
       },
     };
     expect(hitTestOp(op, { x: 50, y: 30 }, 2)).toBe(true);
@@ -45,6 +49,8 @@ describe('Phase 11: filled-shape erasing', () => {
         outlineColor: '#000',
         fillColor: 'transparent',
         strokeWidth: 3,
+        outlineOpacity: 1,
+        fillOpacity: 1,
       },
     };
     expect(hitTestOp(op, { x: 50, y: 50 }, 2)).toBe(false);

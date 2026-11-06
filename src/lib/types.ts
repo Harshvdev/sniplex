@@ -34,6 +34,9 @@ export interface CanvasAreaApi {
   captureSnapshot(): { data: Uint8ClampedArray; width: number; height: number; model?: EditorModel } | null;
   /** Phase 11: removes all ink, keeping the pristine capture. */
   eraseAllInk(): void;
+  /** Docked crop Apply/Cancel (secondary toolbar). */
+  commitCrop(): void;
+  cancelCrop(): void;
 }
 
 export interface TabItem {

@@ -1,32 +1,63 @@
 /**
- * Phase 18 — Digital Drafting Tools (Ruler & Protractor).
+ * Phase 18 — Digital Ruler Tool.
  *
- * A draggable translucent straightedge with tick marks, and a 360° circular
- * protractor. Wheel rotation works in 1° steps (Shift: 15°), and drawing
- * near the ruler edge (or the protractor arc) snaps the stroke onto it.
+ * A draggable translucent straightedge with tick marks. It rotates in the
+ * 0°–90° range around the mouse cursor (the hinge point). Drawing near any
+ * of the four edges with the pen or highlighter snaps the stroke onto that
+ * edge; the eraser can be guided the same way.
  */
 
-export type DraftingTool = 'off' | 'ruler' | 'protractor';
+export type DraftingTool = 'off' | 'ruler';
 
 export const RULER_WHEEL_STEP = 1;
-export const RULER_WHEEL_STEP_FAST = 15;
 export const RULER_SNAP_DISTANCE = 18;
-export const PROTRACTOR_RADIUS = 90;
-export const PROTRACTOR_SNAP_DISTANCE = 14;
 
-/** Normalizes any angle to [0, 360). */
-export function normalizeAngle(degrees: number): number {
-  const normalized = degrees % 360;
-  return normalized < 0 ? normalized + 360 : normalized;
+/** Half-length of the rendered ruler straightedge (image px). */
+export const RULER_HALF_LENGTH = 160;
+/** Half-thickness of the rendered ruler strip (image px). */
+export const RULER_HALF_THICKNESS = 16;
+
+export const RULER_MIN_ANGLE = 0;
+export const RULER_MAX_ANGLE = 90;
+
+/** Clamps an angle into the ruler's 0°–90° travel. */
+export function clampRulerAngle(degrees: number): number {
+  if (!Number.isFinite(degrees)) return RULER_MIN_ANGLE;
+  return Math.min(RULER_MAX_ANGLE, Math.max(RULER_MIN_ANGLE, degrees));
 }
 
-/** Rotates an angle by a wheel delta (1° per notch, Shift: 15°). */
-export function wheelRotateAngle(current: number, deltaY: number, shift: boolean): number {
-  const step = shift ? RULER_WHEEL_STEP_FAST : RULER_WHEEL_STEP;
-  return normalizeAngle(current + (deltaY < 0 ? step : -step));
+/** Rotates the ruler by one wheel notch, clamped to 0°–90°. */
+export function wheelRotateAngle(current: number, deltaY: number): number {
+  const step = RULER_WHEEL_STEP;
+  return clampRulerAngle(current + (deltaY < 0 ? step : -step));
 }
 
-/** Unit direction for an angle in degrees (0° = east, counter-clockwise). */
+/**
+ * Rotates `origin` around the hinge point so the hinge stays under the
+ * cursor. Returns the new origin and angle. This is the pointer-tip hinge
+ * rotation: the ruler turns about the cursor, not about its own center.
+ */
+export function rotateAroundHinge(
+  origin: DraftPoint,
+  angle: number,
+  hinge: DraftPoint,
+  deltaDegrees: number
+): { origin: DraftPoint; angle: number } {
+  const nextAngle = clampRulerAngle(angle + deltaDegrees);
+  const applied = nextAngle - angle;
+  const radians = (applied * Math.PI) / 180;
+  const dx = origin.x - hinge.x;
+  const dy = origin.y - hinge.y;
+  return {
+    angle: nextAngle,
+    origin: {
+      x: hinge.x + dx * Math.cos(radians) + dy * Math.sin(radians),
+      y: hinge.y - dx * Math.sin(radians) + dy * Math.cos(radians),
+    },
+  };
+}
+
+/** Unit direction for an angle in degrees (0° = east, counter-clockwise on screen). */
 export function angleDirection(degrees: number): { x: number; y: number } {
   const radians = (degrees * Math.PI) / 180;
   return { x: Math.cos(radians), y: -Math.sin(radians) };
@@ -58,9 +89,6 @@ export function rulerProjection(
   return { distance: Math.abs(perpendicular), projected };
 }
 
-/** Half-length of the rendered ruler straightedge (image px). */
-export const RULER_HALF_LENGTH = 160;
-
 /** True when the projected point lands on the physical straightedge segment. */
 export function rulerProjectionOnSegment(
   origin: DraftPoint,
@@ -84,20 +112,56 @@ export function shouldSnapToRuler(
 }
 
 /**
- * Distance from a point to the protractor's outer arc. Snapping follows the
- * circle when the pointer is near the rim.
+ * Projects a point onto the nearest of the ruler strip's four edges.
+ * In ruler-local coordinates (along = across the strip length,
+ * perpendicular = across its thickness) the four edges are the two long
+ * sides at perpendicular ±half-thickness and the two short sides at
+ * along ±half-length. Returns the closest edge point if it is within
+ * `threshold` image pixels, otherwise null.
  */
-export function protractorArcDistance(center: DraftPoint, radius: number, point: DraftPoint): number {
-  const distance = Math.hypot(point.x - center.x, point.y - center.y);
-  return Math.abs(distance - radius);
-}
-
-/** True when a stroke point should snap onto the protractor arc. */
-export function shouldSnapToProtractor(
-  center: DraftPoint,
-  radius: number,
+export function rulerEdgeProjection(
+  origin: DraftPoint,
+  angle: number,
   point: DraftPoint,
-  threshold: number = PROTRACTOR_SNAP_DISTANCE
-): boolean {
-  return protractorArcDistance(center, radius, point) <= threshold;
+  threshold: number = RULER_SNAP_DISTANCE
+): { distance: number; projected: DraftPoint } | null {
+  const direction = angleDirection(angle);
+  const perpendicularDir = { x: -direction.y, y: direction.x };
+  const dx = point.x - origin.x;
+  const dy = point.y - origin.y;
+  const along = dx * direction.x + dy * direction.y;
+  const perp = dx * perpendicularDir.x + dy * perpendicularDir.y;
+
+  type Edge = { a: number; p: number; ba: number; bp: number; horizontal: boolean };
+  // In (along, perp) space each edge runs between its two endpoints.
+  const edges: Edge[] = [
+    { a: -RULER_HALF_LENGTH, p: -RULER_HALF_THICKNESS, ba: RULER_HALF_LENGTH, bp: -RULER_HALF_THICKNESS, horizontal: true },
+    { a: -RULER_HALF_LENGTH, p: RULER_HALF_THICKNESS, ba: RULER_HALF_LENGTH, bp: RULER_HALF_THICKNESS, horizontal: true },
+    { a: -RULER_HALF_LENGTH, p: -RULER_HALF_THICKNESS, ba: -RULER_HALF_LENGTH, bp: RULER_HALF_THICKNESS, horizontal: false },
+    { a: RULER_HALF_LENGTH, p: -RULER_HALF_THICKNESS, ba: RULER_HALF_LENGTH, bp: RULER_HALF_THICKNESS, horizontal: false },
+  ];
+
+  function pointOnSegment(ax: number, ay: number, bx: number, by: number): { distance: number; projected: DraftPoint } {
+    const lenSq = (bx - ax) * (bx - ax) + (by - ay) * (by - ay);
+    const t = lenSq === 0 ? 0 : Math.max(0, Math.min(1, ((along - ax) * (bx - ax) + (perp - ay) * (by - ay)) / lenSq));
+    const projAlong = ax + (bx - ax) * t;
+    const projPerp = ay + (by - ay) * t;
+    const distance = Math.hypot(along - projAlong, perp - projPerp);
+    return {
+      distance,
+      projected: {
+        x: origin.x + direction.x * projAlong + perpendicularDir.x * projPerp,
+        y: origin.y + direction.y * projAlong + perpendicularDir.y * projPerp,
+      },
+    };
+  }
+
+  let best: { distance: number; projected: DraftPoint } | null = null;
+  for (const edge of edges) {
+    const candidate = pointOnSegment(edge.a, edge.p, edge.ba, edge.bp);
+    if (candidate.distance <= threshold && (!best || candidate.distance < best.distance)) {
+      best = candidate;
+    }
+  }
+  return best;
 }

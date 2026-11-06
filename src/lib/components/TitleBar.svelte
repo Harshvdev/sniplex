@@ -10,6 +10,7 @@
     onSelectTab = (id: string) => {},
     onCloseTab = (id: string) => {},
     onNewTab = () => {},
+    onRequestClose = null,
   }: {
     tabs: TabItem[];
     activeTabId: string;
@@ -17,6 +18,8 @@
     onSelectTab: (id: string) => void;
     onCloseTab: (id: string) => void;
     onNewTab: () => void;
+    /** Return false to intercept the close (unsaved-changes prompt). */
+    onRequestClose: (() => void) | null;
   } = $props();
 
   async function handleMinimize() {
@@ -38,6 +41,7 @@
   }
 
   async function handleClose() {
+    if (onRequestClose) { onRequestClose(); return; }
     try {
       const { getCurrentWindow } = await import('@tauri-apps/api/window');
       const current = getCurrentWindow();

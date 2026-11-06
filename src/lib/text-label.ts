@@ -21,7 +21,21 @@ export interface TextLabel {
   fontSize: number;
   color: string;
   align: TextAlign;
+  fontFamily: string;
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  highlight: boolean;
 }
+
+export const TEXT_FONT_FAMILIES = [
+  { id: 'Segoe UI Variable', label: 'Segoe UI Variable' },
+  { id: 'Segoe UI', label: 'Segoe UI' },
+  { id: 'Georgia', label: 'Georgia' },
+  { id: 'Consolas', label: 'Consolas' },
+] as const;
+
+export const TEXT_DEFAULT_FONT_FAMILY = 'Segoe UI Variable';
 
 export function clampTextSize(size: number): number {
   if (!Number.isFinite(size)) return TEXT_DEFAULT_SIZE;
@@ -49,6 +63,11 @@ export function createTextLabel(partial: Partial<TextLabel> = {}): TextLabel {
     fontSize: clampTextSize(partial.fontSize ?? TEXT_DEFAULT_SIZE),
     color: partial.color ?? '#000000',
     align: isValidTextAlign(partial.align ?? 'left') ? (partial.align ?? 'left') : 'left',
+    fontFamily: partial.fontFamily ?? TEXT_DEFAULT_FONT_FAMILY,
+    bold: partial.bold ?? false,
+    italic: partial.italic ?? false,
+    underline: partial.underline ?? false,
+    highlight: partial.highlight ?? false,
   };
 }
 

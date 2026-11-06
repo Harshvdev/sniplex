@@ -32,7 +32,9 @@
   import { applyCaptureOutline } from './lib/outline';
   import { normalizeTouchWriting } from './lib/touch-writing';
   import { HistoryStack, copySnapshot, type HistorySnapshot } from './lib/history';
+  import SecondaryToolbar from './lib/components/SecondaryToolbar.svelte';
   import { SHAPE_DEFAULT_FILL, SHAPE_DEFAULT_OUTLINE, SHAPE_DEFAULT_WIDTH, clampShapeWidth } from './lib/shapes';
+  import { TEXT_DEFAULT_FONT_FAMILY, clampTextSize, type TextAlign } from './lib/text-label';
   import {
     buildSaveFileName,
     downloadBlob,
@@ -151,7 +153,6 @@
   });
   let penColor = $state('#0078d4');
   let penSize = $state(3);
-  let penOpacity = $state(100);
   let highlighterColor = $state('#ffeb3b');
   let highlighterSize = $state(18);
   let shapeKind = $state<ShapeKind>('rectangle');
@@ -159,7 +160,18 @@
   let shapeOutlineColor = $state(SHAPE_DEFAULT_OUTLINE);
   let shapeFillColor = $state(SHAPE_DEFAULT_FILL);
   let shapeStrokeWidth = $state(SHAPE_DEFAULT_WIDTH);
+  let shapeFillOpacity = $state(1);
+  let shapeOutlineOpacity = $state(1);
   let emojiGlyph = $state<string | null>(null);
+  // Phase 12 secondary-toolbar text state.
+  let textFontFamily = $state(TEXT_DEFAULT_FONT_FAMILY);
+  let textFontSize = $state(24);
+  let textBold = $state(false);
+  let textItalic = $state(false);
+  let textUnderline = $state(false);
+  let textColor = $state('#000000');
+  let textHighlight = $state(false);
+  let textAlign = $state<TextAlign>('left');
   // Phase 18: active drafting overlay.
   let draftingTool = $state<DraftingTool>('off');
   let zoom = $state(100);
@@ -207,12 +219,31 @@
     refreshHistoryState();
   }
 
+  // Crop is a history boundary — Undo never crosses it.
+  function handleHistoryBoundary() {
+    history.clear();
+    refreshHistoryState();
+  }
+
+  // Wet-ink edits amend the latest entry rather than pushing a new one.
+  function handleHistoryAmend(after: HistorySnapshot) {
+    history.replaceLastAfter(copySnapshot(after));
+    refreshHistoryState();
+  }
+
   // Phase 11: Erase all ink — clears annotations, keeps the capture,
   // and stays reversible via Undo.
   function handleEraseAllInk() {
     if (!canvasArea) return;
     canvasArea.eraseAllInk();
     announce('All ink erased');
+  }
+
+  let openFlyoutSignal = $state<{ name: string; nonce: number } | null>(null);
+  let openFlyoutNonce = 0;
+  function openFlyout(name: string) {
+    openFlyoutNonce += 1;
+    openFlyoutSignal = { name, nonce: openFlyoutNonce };
   }
 
   function handleUndo() {
@@ -244,6 +275,15 @@
   let announceTimer: number | null = null;
   let autoCopyTimer: number | null = null;
   let autoCopyTabId = '';
+
+  // Unsaved-changes prompt (Surface G). Set on any canvas mutation,
+  // cleared on save / tab switch / close / fresh capture.
+  let hasUnsavedEdits = $state(false);
+  let unsavedDialogOpen = $state(false);
+  let pendingCloseTabId = $state<string | null>(null);
+  let pendingWindowClose = $state(false);
+  /** Replacement-capture in single-window mode: proceed with triggerNew after choice. */
+  let pendingReplaceCapture = $state(false);
 
   // Tabs - initially empty, starts in EmptyState view
   let tabs = $state<TabItem[]>([]);
@@ -295,6 +335,16 @@
     window.print();
   }
 
+  async function handleOpenScreenshotsFolder() {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('open_folder', { path: settings.screenshotFolder });
+    } catch (err) {
+      console.warn('Could not open screenshots folder:', err);
+      announce('Could not open the screenshots folder');
+    }
+  }
+
   // Phase 16: Save As — encodes the composite to PNG/JPG/GIF/MP4.
   let saveDialogOpen = $state(false);
   let saveFormat = $state<SaveFormat>('png');
@@ -318,6 +368,7 @@
     const fileName = buildSaveFileName(activeTab.title, format);
     downloadBlob(blob, fileName);
     saveDialogOpen = false;
+    hasUnsavedEdits = false;
     announce(`Saved as ${fileName}`);
     showCopyToast(true, `Saved as ${fileName}`);
   }
@@ -414,44 +465,6 @@
     }
   }
 
-  // Phase 17: Edit in External Editor — saves a handoff copy and opens it.
-  async function handleOpenExternalEditor() {
-    if (!activeTab || !canvasArea) return;
-    const blob = await canvasArea.exportPngBlob();
-    if (!blob) {
-      announce('Could not open external editor');
-      showCopyToast(false);
-      return;
-    }
-    const fileName = handoffFileName(activeTab.title, '.png');
-    if (isTauriEnvironment()) {
-      try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const buffer = await blob.arrayBuffer();
-        await invoke('open_in_external_editor', { fileName, bytes: Array.from(new Uint8Array(buffer)) });
-        announce('Opened in external editor');
-        showCopyToast(true, 'Opened in external editor');
-        return;
-      } catch (err) {
-        console.warn('External editor handoff failed:', err);
-        announce('Could not open the external editor');
-        showCopyToast(false, 'Could not open the editor');
-        return;
-      }
-    }
-    downloadBlob(blob, fileName);
-    announce(`Saved ${fileName} — open it in your editor`);
-    showCopyToast(true, `Saved ${fileName}`);
-  }
-
-  // Phase 17: Edit in External Video Editor. Screen recording (Phase 24) is
-  // not implemented in this build, so there is never a recording to hand off.
-  // Say so instead of pretending a handoff happened.
-  async function handleOpenExternalVideoEditor() {
-    announce('Screen recording is not available in this build yet');
-    showCopyToast(false, 'Recording unavailable');
-  }
-
   /** Copies the flattened composite bitmap from the editor canvas. */
   async function copyComposite(): Promise<boolean> {
     if (!activeTab || !canvasArea || isCopying) return false;
@@ -495,6 +508,7 @@
   }
 
   function handleCanvasMutated() {
+    hasUnsavedEdits = true;
     if (!autoCopy || !activeTab) return;
 
     autoCopyTabId = activeTabId;
@@ -527,8 +541,9 @@
     handleTriggerNew();
   }
 
-  function handleCloseTab(id: string) {
+  async function closeTabNow(id: string) {
     historyByTab.delete(id);
+    hasUnsavedEdits = false;
     if (lastHistoryTabId === id) lastHistoryTabId = '__closed__';
     tabs = tabs.filter((t) => t.id !== id);
     if (tabs.length === 0) {
@@ -536,6 +551,94 @@
       activeTabId = '';
     } else if (activeTabId === id) {
       activeTabId = tabs[tabs.length - 1].id;
+    }
+  }
+
+  function handleCloseTab(id: string) {
+    if (settings.askToSaveScreenshots && hasUnsavedEdits && tabs.some((tb) => tb.id === id)) {
+      pendingCloseTabId = id;
+      pendingWindowClose = false;
+      unsavedDialogOpen = true;
+      return;
+    }
+    void closeTabNow(id);
+  }
+
+  function requestWindowClose() {
+    if (settings.askToSaveScreenshots && hasUnsavedEdits && tabs.length > 0) {
+      pendingCloseTabId = null;
+      pendingWindowClose = true;
+      unsavedDialogOpen = true;
+      return;
+    }
+    void doWindowClose();
+  }
+
+  async function doWindowClose() {
+    unsavedDialogOpen = false;
+    hasUnsavedEdits = false;
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      const current = getCurrentWindow();
+      if (current.label !== 'main') {
+        await current.close();
+        return;
+      }
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('exit_app');
+    } catch {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        await getCurrentWindow().close();
+      } catch {
+        window.close();
+      }
+    }
+  }
+
+  function resolveUnsaved(choice: 'save' | 'dont' | 'cancel') {
+    unsavedDialogOpen = false;
+    if (choice === 'cancel') {
+      pendingCloseTabId = null;
+      pendingWindowClose = false;
+      pendingReplaceCapture = false;
+      return;
+    }
+    if (choice === 'save') {
+      saveDialogOpen = true;
+      // After saving, proceed with the pending action.
+      const closeId = pendingCloseTabId;
+      const win = pendingWindowClose;
+      const rep = pendingReplaceCapture;
+      pendingCloseTabId = null;
+      pendingWindowClose = false;
+      pendingReplaceCapture = false;
+      const proceed = () => {
+        hasUnsavedEdits = false;
+        if (win) void doWindowClose();
+        else if (rep) triggerNewNow();
+        else if (closeId) void closeTabNow(closeId);
+      };
+      const check = window.setInterval(() => {
+        if (!saveDialogOpen) {
+          window.clearInterval(check);
+          if (!hasUnsavedEdits) proceed();
+        }
+      }, 150);
+      return;
+    }
+    // don't save
+    hasUnsavedEdits = false;
+    if (pendingWindowClose) {
+      pendingWindowClose = false;
+      void doWindowClose();
+    } else if (pendingReplaceCapture) {
+      pendingReplaceCapture = false;
+      triggerNewNow();
+    } else if (pendingCloseTabId) {
+      const id = pendingCloseTabId;
+      pendingCloseTabId = null;
+      void closeTabNow(id);
     }
   }
 
@@ -577,7 +680,7 @@
     const blockZoomKey = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return;
       const key = e.key;
-      if (key === '+' || key === '=' || key === '-' || key === '_' || key === '0') {
+      if (key === '+' || key === '=' || key === '-' || key === '_' || key === '0' || key === '1') {
         e.preventDefault();
       }
     };
@@ -589,6 +692,17 @@
       window.removeEventListener('wheel', blockZoomWheel, { capture: true });
       window.removeEventListener('keydown', blockZoomKey, { capture: true });
     };
+  });
+
+  /** Blocks OS-level close (Alt+F4 / dock) while unsaved edits need a choice. */
+  $effect(() => {
+    const block = (e: BeforeUnloadEvent) => {
+      if (settings.askToSaveScreenshots && hasUnsavedEdits && tabs.length > 0) {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener('beforeunload', block);
+    return () => window.removeEventListener('beforeunload', block);
   });
 
   onMount(async () => {
@@ -940,12 +1054,12 @@
           mode,
           snipType,
           delay,
-          includeCursor: settings.includeCursor,
+          includeCursor: false,
           originLabel,
         });
         mark('main.command_done');
       } else {
-        const res = await captureDesktopDisplay(settings.includeCursor);
+        const res = await captureDesktopDisplay(false);
         desktopCapture = res.capture;
         wasWindowMaximized = res.wasMaximized;
 
@@ -972,6 +1086,17 @@
   }
 
   function handleTriggerNew() {
+    // Single-window replacement capture prompts when there are unsaved edits.
+    if (!settings.multipleInstances && settings.askToSaveScreenshots && hasUnsavedEdits && tabs.length > 0) {
+      pendingReplaceCapture = true;
+      unsavedDialogOpen = true;
+      return;
+    }
+    triggerNewNow();
+  }
+
+  function triggerNewNow() {
+    hasUnsavedEdits = false;
     if (delay > 0) {
       if (countdownTimer) clearInterval(countdownTimer);
       countdown = delay;
@@ -1139,6 +1264,7 @@
       },
     ];
     activeTabId = newId;
+    hasUnsavedEdits = false;
     desktopCapture = null;
     pendingAutoCopy = imageUrl.length > 0;
     if (imageUrl) {
@@ -1161,7 +1287,7 @@
       return;
     }
 
-    const res = await captureDesktopDisplay(settings.includeCursor);
+    const res = await captureDesktopDisplay(false);
     wasWindowMaximized = res.wasMaximized;
     await handleCapture({
       imageUrl: res.capture.image_data_url,
@@ -1293,8 +1419,15 @@
       return;
     }
 
-    // Ctrl + 0: fit the capture to the viewport
+    // Ctrl + 0: view actual size (100%)
     if (hasImageTab && modifier && e.key === '0') {
+      e.preventDefault();
+      zoom = 100;
+      return;
+    }
+
+    // Ctrl + 1: fit the capture to the viewport
+    if (hasImageTab && modifier && e.key === '1') {
       e.preventDefault();
       canvasArea?.fitToViewport();
       return;
@@ -1327,6 +1460,15 @@
       return;
     }
 
+    // Ctrl+R: toggle the crown (ruler) overlay. Scan Text is Phase 21 and
+    // not built yet, so the dual binding always resolves to the ruler.
+    if (hasImageTab && modifier && e.key.toLowerCase() === 'r') {
+      e.preventDefault();
+      draftingTool = draftingTool === 'ruler' ? 'off' : 'ruler';
+      announce(draftingTool === 'ruler' ? 'Ruler shown' : 'Ruler hidden');
+      return;
+    }
+
     // Ctrl+P: Print
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') {
       e.preventDefault();
@@ -1339,6 +1481,25 @@
       e.preventDefault();
       handleSave();
       return;
+    }
+
+    // Alt keytips (behavioral Surface A): badges show while Alt is held;
+    // Alt+1..4 / Alt+letter shortcuts dispatch here.
+    if (e.altKey && !modifier && !e.shiftKey) {
+      const key = e.key.toLowerCase();
+      if (key === '1' || key === 'n') { e.preventDefault(); handleTriggerNew(); return; }
+      if (key === 't') { e.preventDefault(); touchWritingEnabled = !touchWritingEnabled; return; }
+      if (!hasImageTab) { /* editor tools have no target without an image */ }
+      else if (key === 'b') { e.preventDefault(); activeTool = 'pen'; return; }
+      else if (key === 'h') { e.preventDefault(); activeTool = 'highlighter'; return; }
+      else if (key === 'e') { e.preventDefault(); activeTool = 'eraser'; return; }
+      if (key === 'i') { e.preventDefault(); if (hasImageTab) isCropping = !isCropping; return; }
+      if (key === 's') { e.preventDefault(); handleSave(); return; }
+      if (key === 'z') { e.preventDefault(); openFlyout('zoom'); return; }
+      if (key === '2') { e.preventDefault(); openFlyout('snipType'); return; }
+      if (key === '3' || key === 'd') { e.preventDefault(); openFlyout('delay'); return; }
+      if (key === '4' || key === 'm') { e.preventDefault(); openFlyout(key === 'm' && !hasImageTab ? 'snip' : 'more'); return; }
+      if (key === 'a' || key === 'o') { e.preventDefault(); openFlyout('snipType'); return; }
     }
   }
 </script>
@@ -1375,7 +1536,8 @@
         {tabs}
         {activeTabId}
         {theme}
-        onSelectTab={(id) => { activeTabId = id; view = 'editor'; }}
+        onRequestClose={requestWindowClose}
+        onSelectTab={(id) => { activeTabId = id; hasUnsavedEdits = false; view = 'editor'; }}
         onCloseTab={handleCloseTab}
         onNewTab={handleNewTab}
       />
@@ -1388,7 +1550,6 @@
         {activeTool}
         {penColor}
         {penSize}
-        {penOpacity}
         {highlighterColor}
         {highlighterSize}
         {shapeKind}
@@ -1423,7 +1584,6 @@
         onToolChange={(t) => activeTool = t}
         onPenColorChange={(c) => penColor = c}
         onPenSizeChange={(s) => penSize = s}
-        onPenOpacityChange={(o) => penOpacity = o}
         onHighlighterColorChange={(c) => highlighterColor = c}
         onHighlighterSizeChange={(s) => highlighterSize = clampHighlighterSize(s)}
         onShapeKindChange={(s) => shapeKind = s}
@@ -1431,20 +1591,57 @@
         onZoomChange={(z) => zoom = clampZoom(z)}
         onSave={handleSave}
         onCopy={() => { void copyComposite(); }}
-        hasVideo={mode === 'record'}
         onShare={handleShare}
-        onOpenExternalEditor={handleOpenExternalEditor}
-        onOpenExternalVideoEditor={handleOpenExternalVideoEditor}
         draftingTool={draftingTool}
         onDraftingChange={(tool) => {
           draftingTool = tool;
-          announce(tool === 'off' ? 'Drafting tools off' : `${tool === 'ruler' ? 'Ruler' : 'Protractor'} shown`);
+          announce(tool === 'off' ? 'Ruler hidden' : 'Ruler shown');
         }}
         onOpenSettings={() => view = 'settings'}
         onOpenFile={handleOpenFile}
+        onOpenScreenshotsFolder={handleOpenScreenshotsFolder}
+        {openFlyoutSignal}
         onPrint={handlePrint}
         onToggleCrop={() => isCropping = !isCropping}
         onClearAll={handleEraseAllInk}
+      />
+
+      <!-- 2b. Contextual secondary sub-toolbar -->
+      <SecondaryToolbar
+        {activeTool}
+        {isCropping}
+        {shapeKind}
+        {shapeFillColor}
+        {shapeFillOpacity}
+        {shapeOutlineColor}
+        {shapeOutlineOpacity}
+        {shapeStrokeWidth}
+        {emojiGlyph}
+        onShapeKindChange={(s) => shapeKind = s}
+        onFillColorChange={(c) => shapeFillColor = c}
+        onFillOpacityChange={(o) => shapeFillOpacity = o}
+        onOutlineColorChange={(c) => shapeOutlineColor = c}
+        onOutlineOpacityChange={(o) => shapeOutlineOpacity = o}
+        onStrokeWidthChange={(w) => shapeStrokeWidth = clampShapeWidth(w)}
+        onEmojiSelect={(g) => emojiGlyph = emojiGlyph === g ? null : g}
+        {textFontFamily}
+        {textFontSize}
+        {textBold}
+        {textItalic}
+        {textUnderline}
+        {textColor}
+        {textHighlight}
+        {textAlign}
+        onTextFontFamilyChange={(f) => textFontFamily = f}
+        onTextFontSizeChange={(s) => textFontSize = clampTextSize(s)}
+        onTextBoldChange={(b) => textBold = b}
+        onTextItalicChange={(i) => textItalic = i}
+        onTextUnderlineChange={(u) => textUnderline = u}
+        onTextColorChange={(c) => textColor = c}
+        onTextHighlightChange={(h) => textHighlight = h}
+        onTextAlignChange={(a) => textAlign = a}
+        onApplyCrop={() => canvasArea?.commitCrop()}
+        onCancelCrop={() => canvasArea?.cancelCrop()}
       />
 
       <!-- 3. Main Body View (Canvas, Empty, or Settings) -->
@@ -1454,7 +1651,7 @@
           onShortcutsChange={handleShortcutsChange}
         />
       {:else if view === 'empty' || tabs.length === 0}
-        <EmptyState />
+        <EmptyState {mode} />
       {:else}
         <CanvasArea
           bind:this={canvasArea}
@@ -1465,14 +1662,23 @@
           {activeTool}
           {penColor}
           {penSize}
-          {penOpacity}
           {highlighterColor}
           {highlighterSize}
           {shapeKind}
           {shapeOutlineColor}
           {shapeFillColor}
           {shapeStrokeWidth}
+          {shapeOutlineOpacity}
+          {shapeFillOpacity}
           {emojiGlyph}
+          {textFontFamily}
+          {textFontSize}
+          {textBold}
+          {textItalic}
+          {textUnderline}
+          {textColor}
+          {textHighlight}
+          {textAlign}
           draftingTool={draftingTool}
           {touchWritingEnabled}
           {isCropping}
@@ -1482,6 +1688,8 @@
           onImageReady={handleCanvasImageReady}
           onCanvasMutated={handleCanvasMutated}
           onHistoryPush={handleHistoryPush}
+          onHistoryBoundary={handleHistoryBoundary}
+          onHistoryAmend={handleHistoryAmend}
         />
       {/if}
 
@@ -1538,6 +1746,21 @@
             <div class="mt-4 flex justify-end gap-2">
               <button type="button" class="rounded-md px-3 py-1.5 text-xs text-neutral-600 hover:bg-black/5 dark:text-neutral-300 dark:hover:bg-white/10" onclick={() => saveDialogOpen = false}>Cancel</button>
               <button type="button" class="rounded-md bg-[#0067c0] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#1070c7]" onclick={confirmSave}>Save</button>
+            </div>
+          </div>
+        </div>
+      {/if}
+
+      <!-- Unsaved changes confirmation (Surface G) -->
+      {#if unsavedDialogOpen}
+        <div class="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 backdrop-blur-sm" role="alertdialog" aria-modal="true" aria-label="Do you want to save changes?" tabindex="-1" onpointerdown={(e) => { if (e.target === e.currentTarget) resolveUnsaved('cancel'); }}>
+          <div class="w-80 rounded-xl border border-black/10 bg-white p-4 shadow-xl dark:border-white/10 dark:bg-[#181d28]">
+            <h2 class="text-sm font-semibold text-neutral-800 dark:text-neutral-100">Do you want to save changes?</h2>
+            <p class="mt-1 text-xs text-neutral-500 dark:text-neutral-400">Your edits to this capture have not been saved yet.</p>
+            <div class="mt-4 flex justify-end gap-2">
+              <button type="button" class="rounded-md px-3 py-1.5 text-xs text-neutral-600 hover:bg-black/5 dark:text-neutral-300 dark:hover:bg-white/10" onclick={() => resolveUnsaved('cancel')}>Cancel</button>
+              <button type="button" class="rounded-md px-3 py-1.5 text-xs text-neutral-600 hover:bg-black/5 dark:text-neutral-300 dark:hover:bg-white/10" onclick={() => resolveUnsaved('dont')}>Don't save</button>
+              <button type="button" class="rounded-md bg-[#0067c0] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#1070c7]" onclick={() => resolveUnsaved('save')}>Save</button>
             </div>
           </div>
         </div>

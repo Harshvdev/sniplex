@@ -18,7 +18,6 @@
     translateOp,
   } from '../markup';
   import type { HistorySnapshot } from '../history';
-  import TextEditorBar from './TextEditorBar.svelte';
   import {
     clampTextSize,
     createTextLabel,
@@ -34,15 +33,14 @@
   } from '../text-label';
   import DraftingOverlay from './DraftingOverlay.svelte';
   import {
-    PROTRACTOR_RADIUS,
-    PROTRACTOR_SNAP_DISTANCE,
     RULER_SNAP_DISTANCE,
     rulerProjection,
-    shouldSnapToProtractor,
-    shouldSnapToRuler,
+    rulerEdgeProjection,
+    rotateAroundHinge,
     type DraftingTool,
   } from '../drafting';
   import {
+    clampCropRect,
     fullCropRect,
     isEffectiveCrop,
     resizeCropRect,
@@ -80,14 +78,23 @@
     activeTool = 'pen',
     penColor = '#0078d4',
     penSize = 3,
-    penOpacity = 100,
     highlighterColor = '#ffeb3b',
     highlighterSize = 18,
     shapeKind = 'rectangle',
     shapeOutlineColor = SHAPE_DEFAULT_OUTLINE,
     shapeFillColor = SHAPE_DEFAULT_FILL,
     shapeStrokeWidth = 3,
+    shapeOutlineOpacity = 1,
+    shapeFillOpacity = 1,
     emojiGlyph = null,
+    textFontFamily = 'Segoe UI Variable',
+    textFontSize = 24,
+    textBold = false,
+    textItalic = false,
+    textUnderline = false,
+    textColor = '#000000',
+    textHighlight = false,
+    textAlign = 'left',
     draftingTool = 'off',
     touchWritingEnabled = false,
     isCropping = false,
@@ -97,6 +104,8 @@
     onImageReady = () => {},
     onCanvasMutated = () => {},
     onHistoryPush = (_label: string, _before: HistorySnapshot, _after: HistorySnapshot) => {},
+    onHistoryBoundary = () => {},
+    onHistoryAmend = (_after: HistorySnapshot) => {},
   }: {
     imageUrl: string;
     width?: number;
@@ -105,7 +114,6 @@
     activeTool: ToolType;
     penColor: string;
     penSize: number;
-    penOpacity: number;
     highlighterColor: string;
     highlighterSize: number;
     /** Phase 13: selected shape and its outline/fill style. */
@@ -113,9 +121,19 @@
     shapeOutlineColor: string;
     shapeFillColor: string;
     shapeStrokeWidth: number;
+    shapeOutlineOpacity: number;
+    shapeFillOpacity: number;
     /** Phase 13: armed emoji stamp glyph, if any. */
+    textFontFamily: string;
+    textFontSize: number;
+    textBold: boolean;
+    textItalic: boolean;
+    textUnderline: boolean;
+    textColor: string;
+    textHighlight: boolean;
+    textAlign: TextAlign;
     emojiGlyph: string | null;
-    /** Phase 18: active drafting overlay (ruler / protractor / off). */
+    /** Phase 18: active drafting overlay (ruler / off). */
     draftingTool: DraftingTool;
     /** Phase 8 toggle: one finger inks when on, pans when off. */
     touchWritingEnabled: boolean;
@@ -131,6 +149,10 @@
       before: HistorySnapshot,
       after: HistorySnapshot
     ) => void;
+    /** Fired at a non-undoable boundary (crop) so undo cannot cross it. */
+    onHistoryBoundary?: () => void;
+    /** Wet-ink edits amend the latest entry instead of pushing a new one. */
+    onHistoryAmend?: (after: HistorySnapshot) => void;
   } = $props();
 
   let viewportEl = $state<HTMLDivElement | null>(null);
@@ -177,60 +199,74 @@
   }
 
   /**
-   * Phase 14: applies the crop. Re-renders from the *pristine* source cropped
-   * to the frame plus translated markup ops, through history — so undo keeps
-   * the pre-crop canvas alive and the cropped base stays truly pristine.
+   * Phase 14: applies the crop non-destructively. Crop is NOT undoable
+   * (Phase 9 crop-isolation rule) — instead of pushing history, the original
+   * buffer is preserved so re-entering Crop restores it.
    */
   function applyCrop() {
     if (!ctx || !canvasEl) { onApplyCrop(); return; }
     const rect = cropRect;
     if (rect.width <= 0 || rect.height <= 0) { onApplyCrop(); return; }
-    // A full-canvas frame changes nothing — close without a history entry.
-    if (!isEffectiveCrop(rect, canvasWidth, canvasHeight)) {
+
+    // A full-frame Apply when a restore snapshot exists means "un-crop".
+    const restoring = cropOriginal !== null && !isEffectiveCrop(rect, cropOriginal.width, cropOriginal.height);
+
+    if (!cropOriginal) {
+      cropOriginal = {
+        source: sourceImage,
+        width: canvasWidth,
+        height: canvasHeight,
+        ops: cloneMarkupOps(ops),
+      };
+    }
+
+    if (restoring) {
+      const original = cropOriginal;
+      sourceImage = original.source;
+      canvasWidth = original.width;
+      canvasHeight = original.height;
+      canvasEl.width = canvasWidth;
+      canvasEl.height = canvasHeight;
+      ops = cloneMarkupOps(original.ops);
+      cropOriginal = null;
+      lastCropRect = null;
+    } else if (!isEffectiveCrop(rect, canvasWidth, canvasHeight)) {
       resetCropFrame();
       onApplyCrop();
       return;
+    } else {
+      const croppedSource = document.createElement('canvas');
+      croppedSource.width = Math.max(1, Math.round(rect.width));
+      croppedSource.height = Math.max(1, Math.round(rect.height));
+      const croppedCtx = croppedSource.getContext('2d');
+      if (croppedCtx && sourceImage) {
+        croppedCtx.drawImage(
+          sourceImage,
+          rect.x, rect.y, rect.width, rect.height,
+          0, 0, croppedSource.width, croppedSource.height
+        );
+      } else if (croppedCtx) {
+        croppedCtx.fillStyle = '#ffffff';
+        croppedCtx.fillRect(0, 0, croppedSource.width, croppedSource.height);
+      }
+
+      canvasWidth = croppedSource.width;
+      canvasHeight = croppedSource.height;
+      sourceImage = croppedSource;
+      canvasEl.width = canvasWidth;
+      canvasEl.height = canvasHeight;
+      ops = ops
+        .filter((op) => opIntersectsRect(op, rect))
+        .map((op) => translateOp(op, -rect.x, -rect.y));
+      lastCropRect = { ...rect };
     }
-
-    const before = captureSnapshot();
-
-    const croppedSource = document.createElement('canvas');
-    croppedSource.width = Math.max(1, Math.round(rect.width));
-    croppedSource.height = Math.max(1, Math.round(rect.height));
-    const croppedCtx = croppedSource.getContext('2d');
-    if (croppedCtx && sourceImage) {
-      croppedCtx.drawImage(
-        sourceImage,
-        rect.x,
-        rect.y,
-        rect.width,
-        rect.height,
-        0,
-        0,
-        croppedSource.width,
-        croppedSource.height
-      );
-    } else if (croppedCtx) {
-      croppedCtx.fillStyle = '#ffffff';
-      croppedCtx.fillRect(0, 0, croppedSource.width, croppedSource.height);
-    }
-
-    canvasWidth = croppedSource.width;
-    canvasHeight = croppedSource.height;
-    sourceImage = croppedSource;
-    canvasEl.width = canvasWidth;
-    canvasEl.height = canvasHeight;
-    ops = ops
-      .filter((op) => opIntersectsRect(op, rect))
-      .map((op) => translateOp(op, -rect.x, -rect.y));
 
     sizeInkCanvas();
     resetCropFrame();
     cropDrag = null;
     renderComposite();
-
-    const after = captureSnapshot();
-    if (before && after) onHistoryPush?.('crop image', before, after);
+    // Crop is a history boundary: Undo must never restore pre-crop state.
+    onHistoryBoundary();
     onCanvasMutated();
     onApplyCrop();
   }
@@ -238,12 +274,38 @@
   // Markup ops — the single source of truth for committed ink. Undo/Redo,
   // the eraser, crop and label/emoji edits all re-render from this list.
   let ops = $state<MarkupOp[]>([]);
-  // Phase 13: the emoji op selected for move/resize/rotate.
+  // Non-destructive crop: the pre-crop source + ops, preserved for the session
+  // so re-entering Crop can show/restore the full original.
+  let cropOriginal = $state<{ source: CanvasImageSource | null; width: number; height: number; ops: MarkupOp[] } | null>(null);
+  // Last applied crop rect (image pixels, relative to the original buffer).
+  let lastCropRect = $state<CropRect | null>(null);
+
+  // Re-entering Crop after an applied crop shows the preserved original
+  // buffer with the last crop box indicated (non-destructive restore).
+  $effect(() => {
+    if (isCropping && cropOriginal && lastCropRect) {
+      const original = cropOriginal;
+      sourceImage = original.source;
+      canvasWidth = original.width;
+      canvasHeight = original.height;
+      if (canvasEl) {
+        canvasEl.width = canvasWidth;
+        canvasEl.height = canvasHeight;
+      }
+      ops = cloneMarkupOps(original.ops);
+      cropRect = { ...lastCropRect };
+      cropOriginal = null;
+      sizeInkCanvas();
+      renderComposite();
+    }
+  });
+
+  // Phase 13: the wet emoji (selected until deselected).
   let selectedEmojiId = $state<string | null>(null);
   // Phase 13: drag state for the selected emoji's bounding frame.
   let emojiDrag: {
     id: string;
-    mode: 'move' | 'scale' | 'rotate';
+    mode: 'move' | 'scale';
     startX: number;
     startY: number;
     original: { x: number; y: number; size: number; rotation: number };
@@ -253,6 +315,15 @@
 
   // Phase 13: in-progress drag-drawn shape (live preview on the ink overlay).
   let shapeDrag: ShapeGeometry | null = null;
+  // Phase 13 wet ink: the shape just drawn, still selected until dry merge.
+  let wetShapeId = $state<string | null>(null);
+  let wetShapeDrag: {
+    id: string;
+    mode: 'move' | 'nw' | 'ne' | 'sw' | 'se';
+    startX: number;
+    startY: number;
+    original: ShapeGeometry;
+  } | null = null;
 
   /** Drawable when the shapes tool is active and no emoji stamp is armed. */
   function isShapeDragActive(): boolean {
@@ -269,6 +340,7 @@
     target.lineCap = 'round';
 
     if (shape.fillColor !== 'transparent') {
+      target.globalAlpha = shape.fillOpacity ?? 1;
       target.fillStyle = shape.fillColor;
       if (shape.kind === 'rectangle') {
         target.fillRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
@@ -279,6 +351,7 @@
       }
     }
 
+    target.globalAlpha = shape.outlineOpacity ?? 1;
     if (shape.kind === 'rectangle') {
       target.strokeRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
     } else if (shape.kind === 'oval') {
@@ -384,21 +457,22 @@
     for (const op of ops) drawMarkupOp(ctx, op);
   }
 
-  /** Stamps an emoji glyph onto the composite, through history. */
-  function stampEmoji(glyph: string, x: number, y: number) {
+  /** Stamps an emoji glyph at the canvas center, through history. */
+  function stampEmoji(glyph: string) {
     if (!ctx) return;
     const before = captureSnapshot();
     const op: MarkupOp = {
       type: 'emoji',
       id: createMarkupOpId('emoji'),
       glyph,
-      x,
-      y,
+      x: canvasWidth / 2,
+      y: canvasHeight / 2,
       size: EMOJI_DEFAULT_SIZE,
       rotation: 0,
     };
     ops = [...ops, op];
     selectedEmojiId = op.id;
+    wetShapeId = null;
     renderComposite();
     const after = captureSnapshot();
     if (before && after) onHistoryPush?.('emoji stamp', before, after);
@@ -449,7 +523,117 @@
     ops.find((op) => op.type === 'emoji' && op.id === selectedEmojiId) ?? null
   );
 
-  /** Phase 13: live drag of the selected emoji (move / scale / rotate). */
+  /** Phase 13: the wet shape, still movable/resizable until deselected. */
+  const wetShapeOp = $derived(ops.find((op) => op.type === 'shape' && op.id === wetShapeId) ?? null);
+
+  /** Applies the current flyout style to the wet shape (wet edits, pre-merge). */
+  $effect(() => {
+    if (!wetShapeOp || wetShapeOp.type !== 'shape' || wetShapeDrag) return;
+    const next = {
+      ...wetShapeOp.shape,
+      outlineColor: shapeOutlineColor,
+      fillColor: shapeFillColor,
+      strokeWidth: clampShapeWidth(shapeStrokeWidth),
+      outlineOpacity: shapeOutlineOpacity,
+      fillOpacity: shapeFillOpacity,
+    };
+    if (
+      next.outlineColor !== wetShapeOp.shape.outlineColor ||
+      next.fillColor !== wetShapeOp.shape.fillColor ||
+      next.strokeWidth !== wetShapeOp.shape.strokeWidth ||
+      next.outlineOpacity !== wetShapeOp.shape.outlineOpacity ||
+      next.fillOpacity !== wetShapeOp.shape.fillOpacity
+    ) {
+      ops = ops.map((op) => (op.id === wetShapeOp.id && op.type === 'shape' ? { ...op, shape: next } : op));
+      renderComposite();
+      const after = captureSnapshot();
+      if (after) onHistoryAmend(after);
+    }
+  });
+
+  /** Live drag of the wet shape (move or corner resize). */
+  function updateWetShapeDrag(clientX: number, clientY: number) {
+    if (!wetShapeDrag) return;
+    const point = clientToImage(clientX, clientY);
+    const op = ops.find((o) => o.id === wetShapeDrag!.id);
+    if (!op || op.type !== 'shape') return;
+    const original = wetShapeDrag.original;
+    const dx = point.x - wetShapeDrag.startX;
+    const dy = point.y - wetShapeDrag.startY;
+
+    if (wetShapeDrag.mode === 'move') {
+      ops = ops.map((o) =>
+        o.id === op.id && o.type === 'shape'
+          ? { ...o, shape: { ...original, start: { x: original.start.x + dx, y: original.start.y + dy }, end: { x: original.end.x + dx, y: original.end.y + dy } } }
+          : o
+      );
+    } else {
+      // Resize one corner; line/arrow scale their two endpoints by the bounding box.
+      const bounds = shapeBounds(original);
+      let { left, top, right, bottom } = bounds;
+      if (wetShapeDrag.mode === 'nw') { left += dx; top += dy; }
+      if (wetShapeDrag.mode === 'ne') { right += dx; top += dy; }
+      if (wetShapeDrag.mode === 'sw') { left += dx; bottom += dy; }
+      if (wetShapeDrag.mode === 'se') { right += dx; bottom += dy; }
+      const width = Math.max(1, right - left);
+      const height = Math.max(1, bottom - top);
+      const start = original.start;
+      const end = original.end;
+      ops = ops.map((o) =>
+        o.id === op.id && o.type === 'shape'
+          ? {
+              ...o,
+              shape: {
+                ...original,
+                start: {
+                  x: left + ((start.x - bounds.left) * width) / Math.max(1, bounds.right - bounds.left),
+                  y: top + ((start.y - bounds.top) * height) / Math.max(1, bounds.bottom - bounds.top),
+                },
+                end: {
+                  x: left + ((end.x - bounds.left) * width) / Math.max(1, bounds.right - bounds.left),
+                  y: top + ((end.y - bounds.top) * height) / Math.max(1, bounds.bottom - bounds.top),
+                },
+              },
+            }
+          : o
+      );
+    }
+    renderComposite();
+  }
+
+  /** Begins a wet-shape frame drag. */
+  function beginWetShapeDrag(mode: 'move' | 'nw' | 'ne' | 'sw' | 'se', e: PointerEvent) {
+    const op = wetShapeOp;
+    if (!op || op.type !== 'shape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    const point = clientToImage(e.clientX, e.clientY);
+    wetShapeDrag = {
+      id: op.id,
+      mode,
+      startX: point.x,
+      startY: point.y,
+      original: { ...op.shape, start: { ...op.shape.start }, end: { ...op.shape.end } },
+    };
+    strokeStartSnapshot = captureSnapshot();
+    capturePointer(e.pointerId);
+  }
+
+  /** Dries the wet shape/emoji: merges it into the ink layer. */
+  function dryWetInk() {
+    wetShapeId = null;
+    selectedEmojiId = null;
+    wetShapeDrag = null;
+  }
+
+  // Switching tools dries the wet ink.
+  $effect(() => {
+    if (activeTool !== 'shapes') {
+      dryWetInk();
+    }
+  });
+
+  /** Phase 13: live drag of the wet emoji (move / scale). */
   function updateEmojiDrag(clientX: number, clientY: number) {
     if (!emojiDrag) return;
     const point = clientToImage(clientX, clientY);
@@ -472,18 +656,12 @@
           o.id === op.id && o.type === 'emoji' ? { ...o, size } : o
         );
       }
-    } else {
-      const angleStart = Math.atan2(emojiDrag.startY - original.y, emojiDrag.startX - original.x);
-      const angleNow = Math.atan2(point.y - original.y, point.x - original.x);
-      ops = ops.map((o) =>
-        o.id === op.id && o.type === 'emoji' ? { ...o, rotation: original.rotation + (angleNow - angleStart) } : o
-      );
     }
     renderComposite();
   }
 
   /** Phase 13: begins a bounding-frame drag from one of its handles. */
-  function beginEmojiDrag(mode: 'move' | 'scale' | 'rotate', e: PointerEvent) {
+  function beginEmojiDrag(mode: 'move' | 'scale', e: PointerEvent) {
     const op = selectedEmojiOp;
     if (!op || op.type !== 'emoji') return;
     e.preventDefault();
@@ -502,9 +680,7 @@
   // Phase 12: inline editor state for the label currently being typed, plus
   // typography state. Committed labels live in `ops`.
   let editingLabel = $state<TextLabel | null>(null);
-  let textFontSize = $state(24);
-  let textColor = $state('#000000');
-  let textAlign = $state<TextAlign>('left');
+  // Typography state is owned by the App shell (secondary toolbar).
   let textDrag: {
     id: string;
     startX: number;
@@ -518,8 +694,9 @@
   /** Draws one text label onto a 2d context at image-pixel coordinates. */
   function drawTextLabel(target: CanvasRenderingContext2D, label: TextLabel) {
     target.save();
-    target.fillStyle = label.color;
-    target.font = `${label.fontSize}px 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif`;
+    const weight = label.bold ? '700' : '400';
+    const style = label.italic ? 'italic' : 'normal';
+    target.font = `${style} ${weight} ${label.fontSize}px '${label.fontFamily}', 'Segoe UI', system-ui, sans-serif`;
     target.textAlign = 'left';
     target.textBaseline = 'top';
     const width = labelWidth(label);
@@ -532,7 +709,19 @@
           : label.align === 'right'
             ? width - lineWidth
             : 0;
-      target.fillText(line, label.x + offset, label.y + index * lineHeight);
+      const y = label.y + index * lineHeight;
+      const x = label.x + offset;
+      if (label.highlight) {
+        target.fillStyle = '#fff100';
+        target.globalAlpha = 0.45;
+        target.fillRect(x - 1, y, Math.max(1, lineWidth + 2), label.fontSize * 1.1);
+        target.globalAlpha = 1;
+      }
+      target.fillStyle = label.color;
+      target.fillText(line, x, y);
+      if (label.underline) {
+        target.fillRect(x, y + label.fontSize, Math.max(1, lineWidth), Math.max(1, label.fontSize / 12));
+      }
     }
     target.restore();
   }
@@ -594,6 +783,10 @@
     imageY: number;
     originX: number;
     originY: number;
+    rulerOriginX: number;
+    rulerOriginY: number;
+    rulerAngle: number;
+    startMidY: number;
   } | null = null;
   let suppressSingleTouch = false;
   let gestureScrollPending = false;
@@ -681,11 +874,14 @@
         // A fresh document: drop every bit of prior editing state.
         ops = [];
         selectedEmojiId = null;
+        wetShapeId = null;
         editingLabel = null;
         textDrag = null;
         emojiDrag = null;
         strokeStartSnapshot = null;
         textStrokeSnapshot = null;
+        cropOriginal = null;
+        lastCropRect = null;
         sizeInkCanvas();
         resetCropFrame();
         renderComposite();
@@ -698,11 +894,14 @@
       sourceImage = null;
       ops = [];
       selectedEmojiId = null;
+      wetShapeId = null;
       editingLabel = null;
       textDrag = null;
       emojiDrag = null;
       strokeStartSnapshot = null;
       textStrokeSnapshot = null;
+      cropOriginal = null;
+      lastCropRect = null;
       if (canvasEl) {
         const context = ctx || canvasEl.getContext('2d');
         if (context) {
@@ -743,9 +942,23 @@
   }
 
   function handleWindowKeyDown(e: KeyboardEvent) {
+    // Crop mode keys (spec): Enter applies, Esc cancels, arrows pan the frame.
+    if (isCropping && !editingLabel && !isTypingTarget(e.target)) {
+      if (e.key === 'Enter') { e.preventDefault(); applyCrop(); return; }
+      if (e.key === 'Escape') { e.preventDefault(); cancelCrop(); return; }
+      if (e.key.startsWith('Arrow')) {
+        e.preventDefault();
+        const step = e.shiftKey ? 10 : 1;
+        const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
+        const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
+        cropRect = clampCropRect({ ...cropRect, x: cropRect.x + dx, y: cropRect.y + dy }, canvasWidth, canvasHeight);
+        return;
+      }
+    }
     if (e.key === 'Shift') shiftHeld = true;
     if (e.key === 'Escape') {
       selectedEmojiId = null;
+      wetShapeId = null;
       return;
     }
     if (e.code !== 'Space' && e.key !== ' ') return;
@@ -861,8 +1074,8 @@
   }
 
   function penAlpha(): number {
-    const value = Number.isFinite(penOpacity) ? penOpacity : 100;
-    return Math.min(1, Math.max(0.1, value / 100));
+    // Behavioral plan: pen strokes are always fully opaque.
+    return 1;
   }
 
   function clearInk() {
@@ -1067,58 +1280,53 @@
   }
 
   /**
-   * Phase 18: magnetic snap onto the active ruler or protractor arc.
-   * Scoped to pen/highlighter only. The snap radii are specified in display
-   * pixels, so they are converted into image pixels using the current zoom.
+   * Phase 18: magnetic snap onto the ruler's four edges. In ruler-local
+   * space the strip has two long edges and two short edges; the nearest
+   * edge within the snap radius wins. The eraser is guided the same way.
    */
   function snapDraftingPoint(point: { x: number; y: number }): { x: number; y: number } {
-    if (activeTool !== 'pen' && activeTool !== 'highlighter') return point;
+    if (draftingTool !== 'ruler') return point;
+    if (activeTool !== 'pen' && activeTool !== 'highlighter' && activeTool !== 'eraser') return point;
     const scale = zoom / 100;
-    const rulerThreshold = RULER_SNAP_DISTANCE / scale;
-    const protractorThreshold = PROTRACTOR_SNAP_DISTANCE / scale;
-    if (draftingTool === 'ruler' && shouldSnapToRuler({ x: draftingX, y: draftingY }, draftingAngle, point, rulerThreshold)) {
-      return rulerProjection({ x: draftingX, y: draftingY }, draftingAngle, point).projected;
-    }
-    if (draftingTool === 'protractor' && shouldSnapToProtractor({ x: draftingX, y: draftingY }, PROTRACTOR_RADIUS, point, protractorThreshold)) {
-      const angleFromCenter = Math.atan2(point.y - draftingY, point.x - draftingX);
-      return {
-        x: draftingX + Math.cos(angleFromCenter) * PROTRACTOR_RADIUS,
-        y: draftingY + Math.sin(angleFromCenter) * PROTRACTOR_RADIUS,
-      };
-    }
-    return point;
+    const threshold = RULER_SNAP_DISTANCE / scale;
+    const edge = rulerEdgeProjection({ x: draftingX, y: draftingY }, draftingAngle, point, threshold);
+    return edge ? edge.projected : point;
   }
 
   function startStrokeAt(clientX: number, clientY: number, viaTouch = false) {
     if (!ctx || !canvasEl || !isMarkupTool()) return;
     if (viaTouch && activeTool === 'eraser') return;
 
+    // Phase 13 wet-to-dry: clicking away outside the wet object merges it.
+    {
+      const point = clientToImage(clientX, clientY);
+      let dry = false;
+      if (selectedEmojiId) {
+        const op = ops.find((o) => o.type === 'emoji' && o.id === selectedEmojiId);
+        if (!op || op.type !== 'emoji' || Math.hypot(point.x - op.x, point.y - op.y) > op.size / 2 + 4) dry = true;
+      }
+      if (wetShapeId) {
+        const op = ops.find((o) => o.type === 'shape' && o.id === wetShapeId);
+        if (!op || op.type !== 'shape') dry = true;
+        else {
+          const b = shapeBounds(op.shape);
+          if (point.x < b.left - 4 || point.x > b.right + 4 || point.y < b.top - 4 || point.y > b.bottom + 4) dry = true;
+        }
+      }
+      if (dry) dryWetInk();
+    }
+
     // History: snapshot the composite before this stroke touches it.
     strokeStartSnapshot = captureSnapshot();
     // Phase 13: an armed emoji stamps on click (no drag).
     if (activeTool === 'shapes' && emojiGlyph && !isCropping) {
-      const point = clientToImage(clientX, clientY);
-      stampEmoji(emojiGlyph, point.x, point.y);
+      // Spec: emojis drop directly into the center of the canvas.
+      stampEmoji(emojiGlyph);
       return;
     }
-    // Phase 13: clicking an existing emoji selects it for move/resize/rotate.
+    // Phase 13 wet-to-dry: a deselected emoji is merged ink. Clicking it
+    // does not reselect it — only the Eraser or Undo can affect it now.
     if (activeTool === 'shapes' && !emojiGlyph && !isCropping) {
-      const point = clientToImage(clientX, clientY);
-      const hit = [...ops].reverse().find((op) => op.type === 'emoji' && hitTestOp(op, point, 4));
-      if (hit && hit.type === 'emoji') {
-        strokeStartSnapshot = captureSnapshot();
-        selectedEmojiId = hit.id;
-        isDrawing = true;
-        didStroke = false;
-        emojiDrag = {
-          id: hit.id,
-          mode: 'move',
-          startX: point.x,
-          startY: point.y,
-          original: { x: hit.x, y: hit.y, size: hit.size, rotation: hit.rotation },
-        };
-        return;
-      }
       selectedEmojiId = null;
     }
     // Phase 12: clicking an existing label selects it for dragging/editing
@@ -1142,6 +1350,11 @@
         fontSize: clampTextSize(textFontSize),
         color: textColor,
         align: textAlign,
+        fontFamily: textFontFamily,
+        bold: textBold,
+        italic: textItalic,
+        underline: textUnderline,
+        highlight: textHighlight,
       });
       editingLabel = label;
       return;
@@ -1174,6 +1387,8 @@
         outlineColor: shapeOutlineColor,
         fillColor: shapeFillColor,
         strokeWidth: clampShapeWidth(shapeStrokeWidth),
+        outlineOpacity: shapeOutlineOpacity,
+        fillOpacity: shapeFillOpacity,
       };
       didStroke = true;
       redrawShapePreview();
@@ -1208,6 +1423,11 @@
         canvasWidth,
         canvasHeight
       );
+      return;
+    }
+
+    if (wetShapeDrag) {
+      updateWetShapeDrag(clientX, clientY);
       return;
     }
 
@@ -1298,18 +1518,31 @@
     clearHoldTimer();
     const isPenStroke = activeTool === 'pen';
 
-    // Phase 13: commit the bounding-frame drag (move / scale / rotate).
+    // Phase 13: commit the wet emoji frame drag (move / scale).
     if (emojiDrag) {
       const drag = emojiDrag;
       emojiDrag = null;
       const op = ops.find((o) => o.id === drag.id);
       const changed =
         op && op.type === 'emoji' &&
-        (op.x !== drag.original.x || op.y !== drag.original.y || op.size !== drag.original.size || op.rotation !== drag.original.rotation);
+        (op.x !== drag.original.x || op.y !== drag.original.y || op.size !== drag.original.size);
       if (changed) {
-        const before = strokeStartSnapshot;
         const after = captureSnapshot();
-        if (before && after) onHistoryPush?.('emoji transform', before, after);
+        if (after) onHistoryAmend(after);
+        onCanvasMutated();
+      }
+      strokeStartSnapshot = null;
+      return;
+    }
+
+    if (wetShapeDrag) {
+      const drag = wetShapeDrag;
+      wetShapeDrag = null;
+      const op = ops.find((o) => o.id === drag.id);
+      const changed = op && op.type === 'shape' && JSON.stringify(op.shape) !== JSON.stringify(drag.original);
+      if (changed) {
+        const after = captureSnapshot();
+        if (after) onHistoryAmend(after);
         onCanvasMutated();
       }
       strokeStartSnapshot = null;
@@ -1354,7 +1587,10 @@
     if (isDrawing && didStroke && hasShapeExtent && activeTool === 'shapes' && !emojiGlyph && shapeDrag && ctx && inkEl) {
       const before = strokeStartSnapshot;
       const shape = shapeDrag;
-      ops = [...ops, { type: 'shape', id: createMarkupOpId('shape'), shape }];
+      const shapeId = createMarkupOpId('shape');
+      ops = [...ops, { type: 'shape', id: shapeId, shape }];
+      wetShapeId = shapeId;
+      selectedEmojiId = null;
       renderComposite();
       clearInk();
       const after = captureSnapshot();
@@ -1469,6 +1705,10 @@
     touchGesture = {
       startDistance: Math.max(1, touchDistance()),
       startZoom: zoom,
+      rulerOriginX: draftingX,
+      rulerOriginY: draftingY,
+      rulerAngle: draftingAngle,
+      startMidY: midpoint.y,
       // Image point under the two fingertips.
       imageX: (midpoint.x - rect.left) / scale,
       imageY: (midpoint.y - rect.top) / scale,
@@ -1493,6 +1733,28 @@
 
     const midpoint = touchMidpoint();
     if (!midpoint) return;
+
+    // Phase 8 + 18: with Touch Writing on and the ruler visible, a two-finger
+    // swipe rotates the ruler (swipe down = clockwise, swipe up = counter).
+    if (draftingTool === 'ruler' && touchWritingEnabled) {
+      const deltaY = midpoint.y - gesture.startMidY;
+      const rect = canvasEl?.getBoundingClientRect();
+      const scale = rect ? rect.width / canvasWidth || zoom / 100 : zoom / 100;
+      const hinge = {
+        x: (midpoint.x - (rect ? rect.left : 0)) / scale,
+        y: (midpoint.y - (rect ? rect.top : 0)) / scale,
+      };
+      const rotated = rotateAroundHinge(
+        { x: gesture.rulerOriginX, y: gesture.rulerOriginY },
+        gesture.rulerAngle,
+        hinge,
+        -deltaY * 0.5
+      );
+      draftingX = rotated.origin.x;
+      draftingY = rotated.origin.y;
+      draftingAngle = rotated.angle;
+      return;
+    }
 
     const nextZoom = gestureZoom(touchDistance());
     const zoomChanged = Math.abs(nextZoom - zoom) > 0.001;
@@ -1727,6 +1989,7 @@
       canvasEl.height = canvasHeight;
       ops = cloneMarkupOps(model.ops);
       selectedEmojiId = null;
+      wetShapeId = null;
       editingLabel = null;
       textDrag = null;
       emojiDrag = null;
@@ -1768,6 +2031,16 @@
     const after = captureSnapshot();
     if (after) onHistoryPush?.('erase all ink', before, after);
     onCanvasMutated();
+  }
+
+  /** Docked secondary-toolbar Apply: commits the current crop frame. */
+  export function commitCrop(): void {
+    applyCrop();
+  }
+  /** Docked secondary-toolbar Cancel: exits crop, restoring previous view. */
+  export function cancelCrop(): void {
+    resetCropFrame();
+    onCancelCrop();
   }
 
   /** Returns the flattened composite canvas (base capture plus all markup). */
@@ -1862,26 +2135,6 @@
 </script>
 
 <div class="flex-1 relative flex flex-col overflow-hidden bg-[#e5e7eb] dark:bg-[#07090e]">
-  <!-- Phase 12: floating typography controls while a label is being edited -->
-  {#if editingLabel}
-    <TextEditorBar
-      fontSize={textFontSize}
-      color={textColor}
-      align={textAlign}
-      onFontSizeChange={(size) => {
-        textFontSize = clampTextSize(size);
-        if (editingLabel) editingLabel = { ...editingLabel, fontSize: textFontSize };
-      }}
-      onColorChange={(colorValue) => {
-        textColor = colorValue;
-        if (editingLabel) editingLabel = { ...editingLabel, color: textColor };
-      }}
-      onAlignChange={(alignValue) => {
-        textAlign = alignValue;
-        if (editingLabel) editingLabel = { ...editingLabel, align: textAlign };
-      }}
-    />
-  {/if}
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
   bind:this={viewportEl}
@@ -1949,31 +2202,40 @@
       ></textarea>
     {/if}
 
-    <!-- Phase 13: bounding frame for the selected emoji (move / resize / rotate) -->
+    <!-- Phase 13: bounding frame for the wet emoji (move / resize) -->
     {#if selectedEmojiOp && selectedEmojiOp.type === 'emoji' && !isCropping}
       {@const op = selectedEmojiOp}
       {@const scale = zoom / 100}
       {@const box = op.size * scale}
       <div class="absolute z-10" style="left: {op.x * scale}px; top: {op.y * scale}px;">
         <div
-          class="absolute border-2 border-dashed border-[#0067c0] rounded-sm pointer-events-none"
+          role="button" aria-label="Move emoji" tabindex="0" class="absolute border-2 border-dashed border-[#0067c0] rounded-sm cursor-move"
           style="width: {box}px; height: {box}px; transform: translate(-50%, -50%) rotate({op.rotation}rad);"
+          onpointerdown={(e) => beginEmojiDrag('move', e)}
         >
-          <!-- Connector line to the rotate handle -->
-          <div class="absolute left-1/2 top-0 h-5 w-px -translate-x-1/2 -translate-y-full bg-[#0067c0]"></div>
-          <div
-            class="absolute left-1/2 top-0 h-3.5 w-3.5 -translate-x-1/2 -translate-y-[calc(100%+1.1rem)] rounded-full bg-white border-2 border-[#0067c0] pointer-events-auto cursor-grab"
-            role="button"
-            aria-label="Rotate emoji"
-            tabindex="0"
-            onpointerdown={(e) => beginEmojiDrag('rotate', e)}
-          ></div>
           <!-- 4 corner scale handles (uniform resize around the center) -->
           <div class="absolute -top-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-nwse-resize rounded-sm" role="button" aria-label="Emoji handle" tabindex="0" onpointerdown={(e) => beginEmojiDrag('scale', e)}></div>
           <div class="absolute -top-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-nesw-resize rounded-sm" role="button" aria-label="Emoji handle" tabindex="0" onpointerdown={(e) => beginEmojiDrag('scale', e)}></div>
           <div class="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-nesw-resize rounded-sm" role="button" aria-label="Emoji handle" tabindex="0" onpointerdown={(e) => beginEmojiDrag('scale', e)}></div>
           <div class="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-nwse-resize rounded-sm" role="button" aria-label="Emoji handle" tabindex="0" onpointerdown={(e) => beginEmojiDrag('scale', e)}></div>
         </div>
+      </div>
+    {/if}
+
+    <!-- Phase 13: bounding frame for the wet shape (move / resize) -->
+    {#if wetShapeOp && wetShapeOp.type === 'shape' && !isCropping}
+      {@const shape = wetShapeOp.shape}
+      {@const scale = zoom / 100}
+      {@const bounds = shapeBounds(shape)}
+      {@const frameL = bounds.left * scale}
+      {@const frameT = bounds.top * scale}
+      {@const frameW = Math.max(4, (bounds.right - bounds.left) * scale)}
+      {@const frameH = Math.max(4, (bounds.bottom - bounds.top) * scale)}
+      <div class="absolute z-10 border-2 border-dashed border-[#0067c0] rounded-sm cursor-move" role="button" aria-label="Move shape" tabindex="0" style="left: {frameL}px; top: {frameT}px; width: {frameW}px; height: {frameH}px;" onpointerdown={(e) => beginWetShapeDrag('move', e)}>
+        <div class="absolute -top-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] rounded-sm cursor-nwse-resize" role="button" aria-label="Shape handle" tabindex="0" onpointerdown={(e) => beginWetShapeDrag('nw', e)}></div>
+        <div class="absolute -top-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] rounded-sm cursor-nesw-resize" role="button" aria-label="Shape handle" tabindex="0" onpointerdown={(e) => beginWetShapeDrag('ne', e)}></div>
+        <div class="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] rounded-sm cursor-nesw-resize" role="button" aria-label="Shape handle" tabindex="0" onpointerdown={(e) => beginWetShapeDrag('sw', e)}></div>
+        <div class="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] rounded-sm cursor-nwse-resize" role="button" aria-label="Shape handle" tabindex="0" onpointerdown={(e) => beginWetShapeDrag('se', e)}></div>
       </div>
     {/if}
 
@@ -1989,7 +2251,7 @@
         class="absolute inset-0 bg-black/45 pointer-events-none"
         style="clip-path: polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0, {frameL}px {frameT}px, {frameL}px {frameT + frameH}px, {frameL + frameW}px {frameT + frameH}px, {frameL + frameW}px {frameT}px)"
       ></div>
-      <div class="absolute border-2 border-dashed border-[#0067c0] pointer-events-none" style="left: {cropRect.x * cropScale}px; top: {cropRect.y * cropScale}px; width: {frameW}px; height: {frameH}px;">
+      <div class="absolute border-2 border-dashed border-[#0067c0]" style="left: {cropRect.x * cropScale}px; top: {cropRect.y * cropScale}px; width: {frameW}px; height: {frameH}px;" role="button" aria-label="Move crop frame" tabindex="0" onpointerdown={(e) => beginCropDrag('move', e)}>
         <!-- 4 Corner Handles -->
         <div class="absolute -top-1.5 -left-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-nwse-resize" role="button" aria-label="Crop handle" tabindex="0" onpointerdown={(e) => beginCropDrag('nw', e)}></div>
         <div class="absolute -top-1.5 -right-1.5 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-nesw-resize" role="button" aria-label="Crop handle" tabindex="0" onpointerdown={(e) => beginCropDrag('ne', e)}></div>
@@ -2001,30 +2263,10 @@
         <div class="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-ns-resize" role="button" aria-label="Crop handle" tabindex="0" onpointerdown={(e) => beginCropDrag('s', e)}></div>
         <div class="absolute top-1/2 -left-1.5 -translate-y-1/2 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-ew-resize" role="button" aria-label="Crop handle" tabindex="0" onpointerdown={(e) => beginCropDrag('w', e)}></div>
         <div class="absolute top-1/2 -right-1.5 -translate-y-1/2 w-3 h-3 bg-white border-2 border-[#0067c0] pointer-events-auto cursor-ew-resize" role="button" aria-label="Crop handle" tabindex="0" onpointerdown={(e) => beginCropDrag('e', e)}></div>
-
-        <!-- Floating Apply / Cancel Buttons -->
-        <div class="absolute -bottom-12 left-1/2 -translate-x-1/2 flex items-center gap-1.5 bg-white dark:bg-[#181d28] border border-black/10 dark:border-white/10 rounded-full px-2 py-1 shadow-lg pointer-events-auto">
-          <button
-            type="button"
-            class="p-1 rounded-full hover:bg-black/5 dark:hover:bg-white/10 text-emerald-600 dark:text-emerald-400 transition-colors cursor-pointer"
-            onclick={() => applyCrop()}
-            title="Apply Crop"
-          >
-            <Check class="w-4 h-4 stroke-[2.2]" />
-          </button>
-          <button
-            type="button"
-            class="p-1 rounded-full hover:bg-black/5 dark:hover:bg-white/10 text-rose-600 dark:text-rose-400 transition-colors cursor-pointer"
-            onclick={() => { resetCropFrame(); onCancelCrop(); }}
-            title="Cancel Crop"
-          >
-            <X class="w-4 h-4 stroke-[2.2]" />
-          </button>
-        </div>
       </div>
     {/if}
 
-    <!-- Phase 18: draggable ruler / protractor overlay -->
+    <!-- Phase 18: draggable ruler overlay -->
     <DraftingOverlay
       tool={draftingTool}
       x={draftingX}
@@ -2032,7 +2274,7 @@
       angle={draftingAngle}
       scale={zoom / 100}
       onDrag={(nx, ny) => { draftingX = nx; draftingY = ny; }}
-      onRotate={(angle) => { draftingAngle = angle; }}
+      onRotate={(angle, hx, hy) => { draftingAngle = angle; draftingX = hx; draftingY = hy; }}
     />
   </div>
 </div>

@@ -54,6 +54,21 @@
     }
   }
 
+  async function openFolder(kind: 'screenshot' | 'recording') {
+    const path = kind === 'screenshot' ? settings.screenshotFolder : settings.recordingFolder;
+    try {
+      await invoke('open_folder', { path });
+    } catch {
+      if (kind === 'screenshot') {
+        screenshotDraft = settings.screenshotFolder;
+        editingScreenshotFolder = true;
+      } else {
+        recordingDraft = settings.recordingFolder;
+        editingRecordingFolder = true;
+      }
+    }
+  }
+
   function commitFolder(kind: 'screenshot' | 'recording') {
     if (kind === 'screenshot') {
       const value = screenshotDraft.trim();
@@ -409,27 +424,6 @@
       </div>
 
       <div class="bg-white dark:bg-[#1c1c1c] rounded-lg border border-black/10 dark:border-white/10 shadow-xs divide-y divide-black/5 dark:divide-white/5 overflow-hidden">
-        <!-- Include cursor -->
-        <div class="flex items-center justify-between p-4 gap-4">
-          <div>
-            <div class="text-[13px] font-medium text-neutral-900 dark:text-neutral-100">Include mouse pointer</div>
-            <div class="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5">Draw the visible cursor into captures and recordings</div>
-          </div>
-
-          <button
-            type="button"
-            role="switch"
-            aria-checked={settings.includeCursor}
-            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {settings.includeCursor ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
-            onclick={() => updateSettings({ includeCursor: !settings.includeCursor })}
-            title="Toggle cursor inclusion"
-          >
-            <span
-              class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {settings.includeCursor ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
-            ></span>
-          </button>
-        </div>
-
         <!-- Automatically copy changes -->
         <div class="flex items-center justify-between p-4 gap-4">
           <div>
@@ -507,9 +501,16 @@
                     <button
                       type="button"
                       class="px-2.5 py-1 rounded hover:bg-black/5 dark:hover:bg-white/10 text-neutral-700 dark:text-neutral-300 font-medium transition-colors border border-black/10 dark:border-white/10 cursor-pointer"
+                      onclick={() => openFolder('screenshot')}
+                    >
+                      Open folder
+                    </button>
+                    <button
+                      type="button"
+                      class="px-2.5 py-1 rounded hover:bg-black/5 dark:hover:bg-white/10 text-neutral-700 dark:text-neutral-300 font-medium transition-colors border border-black/10 dark:border-white/10 cursor-pointer"
                       onclick={() => pickFolder('screenshot')}
                     >
-                      Browse...
+                      Change
                     </button>
                     <button
                       type="button"
@@ -581,9 +582,16 @@
                     <button
                       type="button"
                       class="px-2.5 py-1 rounded hover:bg-black/5 dark:hover:bg-white/10 text-neutral-700 dark:text-neutral-300 font-medium transition-colors border border-black/10 dark:border-white/10 cursor-pointer"
+                      onclick={() => openFolder('recording')}
+                    >
+                      Open folder
+                    </button>
+                    <button
+                      type="button"
+                      class="px-2.5 py-1 rounded hover:bg-black/5 dark:hover:bg-white/10 text-neutral-700 dark:text-neutral-300 font-medium transition-colors border border-black/10 dark:border-white/10 cursor-pointer"
                       onclick={() => pickFolder('recording')}
                     >
-                      Browse...
+                      Change
                     </button>
                     <button
                       type="button"
@@ -609,13 +617,13 @@
           <button
             type="button"
             role="switch"
-            aria-checked={settings.askToSave}
-            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {settings.askToSave ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
-            onclick={() => updateSettings({ askToSave: !settings.askToSave })}
+            aria-checked={settings.askToSaveScreenshots}
+            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {settings.askToSaveScreenshots ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
+            onclick={() => updateSettings({ askToSaveScreenshots: !settings.askToSaveScreenshots })}
             title="Toggle confirmation prompt"
           >
             <span
-              class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {settings.askToSave ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
+              class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {settings.askToSaveScreenshots ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"
             ></span>
           </button>
         </div>
@@ -713,6 +721,24 @@
             </div>
           {/if}
         </div>
+
+        <!-- HDR corrector -->
+        <div class="flex items-center justify-between p-4 gap-4">
+          <div>
+            <div class="text-[13px] font-medium text-neutral-900 dark:text-neutral-100">HDR screenshot color corrector</div>
+            <div class="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5">Tone-map over-exposed colors on HDR displays</div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={settings.hdrCorrector}
+            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {settings.hdrCorrector ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
+            onclick={() => updateSettings({ hdrCorrector: !settings.hdrCorrector })}
+            title="Toggle HDR corrector"
+          >
+            <span class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {settings.hdrCorrector ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"></span>
+          </button>
+        </div>
       </div>
     </div>
 
@@ -763,6 +789,24 @@
       </div>
 
       <div class="bg-white dark:bg-[#1c1c1c] rounded-lg border border-black/10 dark:border-white/10 shadow-xs divide-y divide-black/5 dark:divide-white/5 overflow-hidden">
+        <!-- Use Print screen key -->
+        <div class="flex items-center justify-between p-4 gap-4">
+          <div>
+            <div class="text-[13px] font-medium text-neutral-900 dark:text-neutral-100">Use the Print screen key to open screen capture</div>
+            <div class="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5">Allow the Print screen key to launch the floating capture bar</div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={settings.usePrintScreenKey}
+            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {settings.usePrintScreenKey ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
+            onclick={() => updateSettings({ usePrintScreenKey: !settings.usePrintScreenKey })}
+            title="Toggle Print screen key"
+          >
+            <span class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {settings.usePrintScreenKey ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"></span>
+          </button>
+        </div>
+
         <!-- Customizable shortcuts list -->
         {#each shortcuts as sc (sc.id)}
           <div class="p-4">
@@ -856,6 +900,24 @@
       </div>
 
       <div class="bg-white dark:bg-[#1c1c1c] rounded-lg border border-black/10 dark:border-white/10 shadow-xs divide-y divide-black/5 dark:divide-white/5 overflow-hidden">
+        <!-- Ask to save edited screen recordings -->
+        <div class="flex items-center justify-between p-4 gap-4">
+          <div>
+            <div class="text-[13px] font-medium text-neutral-900 dark:text-neutral-100">Ask to save edited screen recordings</div>
+            <div class="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5">Prompt to save or discard trimmed recordings before closing</div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={settings.askToSaveRecordings}
+            class="relative inline-flex h-5 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-200 ease-in-out focus:outline-none {settings.askToSaveRecordings ? 'bg-neutral-900 dark:bg-white' : 'bg-neutral-300 dark:bg-neutral-700'}"
+            onclick={() => updateSettings({ askToSaveRecordings: !settings.askToSaveRecordings })}
+            title="Toggle recording prompt"
+          >
+            <span class="pointer-events-none block h-4 w-4 transform rounded-full shadow-xs transition duration-200 ease-in-out {settings.askToSaveRecordings ? 'translate-x-5 bg-white dark:bg-neutral-900' : 'translate-x-0 bg-white'}"></span>
+          </button>
+        </div>
+
         <!-- Include microphone audio by default -->
         <div class="flex items-center justify-between p-4 gap-4">
           <div>

@@ -1,45 +1,10 @@
+import { DEFAULT_SETTINGS, type SniplexSettings } from './settings-defaults';
 import type { AppTheme } from './types';
-
-export interface SniplexSettings {
-  theme: AppTheme;
-  autoCopy: boolean;
-  includeCursor: boolean;
-  autoSaveScreenshots: boolean;
-  screenshotFolder: string;
-  autoSaveRecordings: boolean;
-  recordingFolder: string;
-  outlineEnabled: boolean;
-  outlineColor: string;
-  outlineWidth: number;
-  multipleInstances: boolean;
-  askToSave: boolean;
-  announcements: boolean;
-  recordMicrophone: boolean;
-  recordSystemAudio: boolean;
-}
 
 const STORAGE_KEY = 'sniplex_settings';
 const LEGACY_THEME_KEY = 'sniplex_theme';
 const LEGACY_AUTO_COPY_KEY = 'sniplex_auto_copy';
 const LEGACY_FOLDER_KEY = 'sniplex_save_folder';
-
-export const DEFAULT_SETTINGS: SniplexSettings = {
-  theme: 'dark',
-  autoCopy: true,
-  includeCursor: false,
-  autoSaveScreenshots: true,
-  screenshotFolder: '~/Pictures/Screenshots',
-  autoSaveRecordings: false,
-  recordingFolder: '~/Videos/Screen Recordings',
-  outlineEnabled: false,
-  outlineColor: '#d13438',
-  outlineWidth: 2,
-  multipleInstances: false,
-  askToSave: true,
-  announcements: true,
-  recordMicrophone: false,
-  recordSystemAudio: true,
-};
 
 const THEMES: AppTheme[] = ['light', 'dark', 'system'];
 
@@ -80,6 +45,8 @@ export function loadSettings(): SniplexSettings {
     theme: legacyTheme && THEMES.includes(legacyTheme) ? legacyTheme : DEFAULT_SETTINGS.theme,
     autoCopy: legacyAutoCopy === null ? DEFAULT_SETTINGS.autoCopy : legacyAutoCopy === 'true',
     screenshotFolder: legacyFolder || DEFAULT_SETTINGS.screenshotFolder,
+    // Migrate the old single "ask to save" toggle onto the screenshot toggle.
+    askToSaveScreenshots: DEFAULT_SETTINGS.askToSaveScreenshots,
   };
 
   if (typeof localStorage === 'undefined') return base;
@@ -88,24 +55,36 @@ export function loadSettings(): SniplexSettings {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return base;
     const parsed = JSON.parse(raw) as Partial<SniplexSettings>;
+    // Migrate old persisted blobs: the single askToSave toggle becomes the
+    // screenshot prompt, and missing new keys fall back to spec defaults.
+    const askToSaveScreenshots =
+      typeof parsed.askToSaveScreenshots === 'boolean'
+        ? parsed.askToSaveScreenshots
+        : typeof parsed.askToSave === 'boolean'
+          ? parsed.askToSave
+          : base.askToSaveScreenshots;
+
     return {
       theme: typeof parsed.theme === 'string' && THEMES.includes(parsed.theme as AppTheme)
         ? (parsed.theme as AppTheme)
         : base.theme,
+      usePrintScreenKey: asBoolean(parsed.usePrintScreenKey, base.usePrintScreenKey),
       autoCopy: asBoolean(parsed.autoCopy, base.autoCopy),
-      includeCursor: asBoolean(parsed.includeCursor, base.includeCursor),
       autoSaveScreenshots: asBoolean(parsed.autoSaveScreenshots, base.autoSaveScreenshots),
       screenshotFolder: asFolder(parsed.screenshotFolder, base.screenshotFolder),
-      autoSaveRecordings: asBoolean(parsed.autoSaveRecordings, base.autoSaveRecordings),
-      recordingFolder: asFolder(parsed.recordingFolder, base.recordingFolder),
+      askToSaveScreenshots,
+      multipleInstances: asBoolean(parsed.multipleInstances, base.multipleInstances),
       outlineEnabled: asBoolean(parsed.outlineEnabled, base.outlineEnabled),
       outlineColor: asColor(parsed.outlineColor, base.outlineColor),
       outlineWidth: asWidth(parsed.outlineWidth, base.outlineWidth),
-      multipleInstances: asBoolean(parsed.multipleInstances, base.multipleInstances),
-      askToSave: asBoolean(parsed.askToSave, base.askToSave),
-      announcements: asBoolean(parsed.announcements, base.announcements),
+      hdrCorrector: asBoolean(parsed.hdrCorrector, base.hdrCorrector),
+      autoSaveRecordings: asBoolean(parsed.autoSaveRecordings, base.autoSaveRecordings),
+      recordingFolder: asFolder(parsed.recordingFolder, base.recordingFolder),
+      askToSaveRecordings: asBoolean(parsed.askToSaveRecordings, base.askToSaveRecordings),
       recordMicrophone: asBoolean(parsed.recordMicrophone, base.recordMicrophone),
       recordSystemAudio: asBoolean(parsed.recordSystemAudio, base.recordSystemAudio),
+      askToSave: askToSaveScreenshots,
+      announcements: asBoolean(parsed.announcements, base.announcements),
     };
   } catch {
     return base;

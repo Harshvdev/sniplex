@@ -68,6 +68,12 @@ export class HistoryStack {
     this.redoStack.length = 0;
   }
 
+  /** Replaces the latest entry's `after` (wet-ink edits before merging). */
+  replaceLastAfter(after: HistorySnapshot): void {
+    const top = this.undoStack[this.undoStack.length - 1];
+    if (top) top.after = after;
+  }
+
   /**
    * Steps backwards. Returns the bitmap the canvas should now display,
    * or `null` when there is nothing to undo.
