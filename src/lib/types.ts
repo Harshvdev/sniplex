@@ -27,6 +27,8 @@ export interface CanvasAreaApi {
   exportPngBlob(): Promise<Blob | null>;
   /** Returns the flattened composite canvas (capture + markup), or null when unavailable. */
   compositeCanvas(): HTMLCanvasElement | null;
+  /** Phase 21: downscaled source canvas for OCR (originals preserved for boxes). */
+  getScanSourceCanvas(maxEdge?: number): HTMLCanvasElement | null;
   fitToViewport(): boolean;
   /** Phase 9: restores a history snapshot onto the composite canvas. */
   restoreSnapshot(data: Uint8ClampedArray, width: number, height: number, model?: EditorModel): void;

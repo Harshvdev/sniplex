@@ -90,6 +90,8 @@
     onToggleCrop = () => {},
     onClearAll = () => {},
     onTriggerOcr = () => {},
+    /** Phase 21: Scan Text active state (modal overlay, not a drawing tool). */
+    isScanActive = false,
     onPrint = () => {},
   }: {
     mode: CaptureMode;
@@ -150,6 +152,8 @@
     onToggleCrop: () => void;
     onClearAll: () => void;
     onTriggerOcr?: () => void;
+    /** Phase 21: Scan Text active state (modal overlay, not a drawing tool). */
+    isScanActive?: boolean;
     onPrint?: () => void;
   } = $props();
 
@@ -337,15 +341,6 @@
       {/if}
     </div>
 
-    <!-- 5. OCR Text Actions Icon (Next to Timer on Homescreen) -->
-    <button
-      type="button"
-      class="h-8 flex items-center justify-center px-2 rounded-[6px] hover:bg-black/[0.05] dark:hover:bg-white/[0.06] border border-transparent hover:border-black/[0.05] dark:hover:border-white/[0.05] transition-colors text-xs text-neutral-700 dark:text-neutral-300 cursor-pointer"
-      onclick={onTriggerOcr}
-      title="Text actions / OCR (Super+Shift+T)"
-    >
-      <ScanText class="w-4 h-4 text-neutral-700 dark:text-neutral-300 stroke-[1.8]" />
-    </button>
   </div>
 
   <!-- CENTER: Annotation & Editing Markup Tools -->
@@ -490,6 +485,19 @@
         </button>
 
       </div>
+
+      <!-- Phase 21: Scan Text (OCR) — modal overlay toggle -->
+      <button
+        type="button"
+        aria-pressed={isScanActive}
+        class="flex items-center gap-1 px-2 py-1.5 rounded-[6px] transition-colors relative {isScanActive ? 'bg-[#0067c0] text-white' : 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300'}"
+        onclick={onTriggerOcr}
+        title={isScanActive ? 'Scan Text (exit)' : 'Scan Text'}
+      >
+        <ScanText class="w-4 h-4 stroke-[1.8]" />
+        <span class="text-xs">Scan</span>
+        {#if showAltHints}<span class="absolute -top-2 left-1/2 -translate-x-1/2 rounded bg-[#0067c0] px-1 text-[8px] font-bold text-white shadow">X</span>{/if}
+      </button>
 
       <!-- Ruler (drafting overlay) -->
       <button

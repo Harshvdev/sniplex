@@ -32,6 +32,10 @@
     wheelLoupeZoom,
   } from '../color-picker';
   import type { ColorFormat, RgbColor } from '../color-picker';
+  import type { ScanResult } from '../scan-text';
+  import { runOcr } from '../scan-text-runner';
+  import { copyTextToClipboard } from '../clipboard';
+  import { Copy, Table2 } from '@lucide/svelte';
 
   let {
     active = false,
@@ -96,6 +100,9 @@
       hoveredWindow = null;
       isSnipMenuOpen = false;
       isDelayMenuOpen = false;
+      // OCR mode does not persist across overlay opens.
+      if (isOcrMode) exitOcrMode();
+      if (isPickingColor) isPickingColor = false;
     } else if (currentSnipType === 'window' && !hoveredWindow && desktopCapture && desktopCapture.windows.length > 0) {
       hoveredWindow = desktopCapture.windows[0];
     }
@@ -216,6 +223,49 @@
     renderLoupe();
   }
 
+  // Overlay OCR mode: selected via the ScanText pill button; drag selects a
+  // rectangle, OCR runs without closing, results render in place.
+  let isOcrMode = $state(false);
+  let ocrResult = $state<ScanResult | null>(null);
+  let ocrStatus = $state<'idle' | 'loading' | 'ready' | 'empty' | 'error'>('idle');
+  let ocrProgress = $state(0);
+  let ocrError = $state<string | null>(null);
+  let ocrSelectedIds = $state<Set<string>>(new Set());
+  let ocrOrigin = $state({ x: 0, y: 0 }); // image-pixel origin of the cropped region
+  let ocrRect = $state<{ x: number; y: number; w: number; h: number } | null>(null);
+  let ocrSelecting = $state(false);
+  let ocrHoverText = $state(false);
+  let ocrToast = $state<string | null>(null);
+  let ocrRunId = 0;
+
+  function exitOcrMode() {
+    isOcrMode = false;
+    ocrResult = null;
+    ocrStatus = 'idle';
+    ocrError = null;
+    ocrSelectedIds = new Set();
+    ocrOrigin = { x: 0, y: 0 };
+    ocrRect = null;
+    ocrSelecting = false;
+    ocrHoverText = false;
+    ocrRunId += 1;
+    if (ocrToastTimer) { clearTimeout(ocrToastTimer); ocrToastTimer = null; }
+    ocrToast = null;
+  }
+
+  let ocrToastTimer: number | null = null;
+  function showOcrToast(msg: string) {
+    ocrToast = msg;
+    if (ocrToastTimer) clearTimeout(ocrToastTimer);
+    ocrToastTimer = window.setTimeout(() => { ocrToast = null; ocrToastTimer = null; }, 1800);
+  }
+
+  async function copyOcrText(text: string) {
+    if (!text) { showOcrToast('Nothing to copy'); return; }
+    const r = await copyTextToClipboard(text);
+    showOcrToast(r.ok ? 'Copied to clipboard' : 'Copy failed');
+  }
+
   // Drag-to-snip interaction state
   let isDragging = $state(false);
   let startX = $state(0);
@@ -267,8 +317,8 @@
     };
   }
 
-  let selectionRect = $derived(
-    isDragging && currentSnipType === 'rectangle'
+  let dragRect = $derived(
+    isDragging && !ocrSelecting && (currentSnipType === 'rectangle' || isOcrMode)
       ? {
           x: Math.min(startX, currentX),
           y: Math.min(startY, currentY),
@@ -277,6 +327,8 @@
         }
       : null
   );
+  // Border stays visible after OCR: live drag while drawing a region, else the saved region.
+  let selectionRect = $derived(dragRect ?? (isOcrMode ? ocrRect : null));
 
   const snipOptions: { id: SnipType; label: string }[] = [
     { id: 'rectangle', label: 'Rectangle' },
@@ -385,6 +437,24 @@
       return;
     }
 
+    // Overlay OCR mode: drag always draws a rectangle, regardless of snip type.
+    if (isOcrMode) {
+      // Drag inside the saved region = word selection; outside = new OCR region.
+      const inside =
+        ocrRect !== null &&
+        e.clientX >= ocrRect.x && e.clientX <= ocrRect.x + ocrRect.w &&
+        e.clientY >= ocrRect.y && e.clientY <= ocrRect.y + ocrRect.h;
+      ocrSelecting = inside && ocrStatus === 'ready';
+      isDragging = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      currentX = e.clientX;
+      currentY = e.clientY;
+      isSnipMenuOpen = false;
+      isDelayMenuOpen = false;
+      return;
+    }
+
     if (currentSnipType === 'fullscreen') {
       executeFullscreenCapture();
       return;
@@ -432,13 +502,22 @@
       return;
     }
 
+    // I-beam cursor over scanned text (persisted region), crosshair elsewhere.
+    if (isOcrMode && ocrStatus === 'ready' && ocrRect !== null) {
+      ocrHoverText =
+        e.clientX >= ocrRect.x && e.clientX <= ocrRect.x + ocrRect.w &&
+        e.clientY >= ocrRect.y && e.clientY <= ocrRect.y + ocrRect.h;
+    } else {
+      ocrHoverText = false;
+    }
+
     if (isDraggingPill) {
       pillX = Math.max(10, Math.min(window.innerWidth - 300, e.clientX - dragOffset.x));
       pillY = Math.max(8, Math.min(window.innerHeight - 60, e.clientY - dragOffset.y));
       return;
     }
 
-    if (currentSnipType === 'window') {
+    if (currentSnipType === 'window' && !isOcrMode) {
       if (desktopCapture && desktopCapture.windows.length > 0) {
         const { scaleX, scaleY } = getScale();
         hoveredWindow = findHoveredWindow(
@@ -452,13 +531,97 @@
 
     if (!isDragging) return;
 
-    if (currentSnipType === 'freeform') {
+    if (currentSnipType === 'freeform' && !isOcrMode) {
       freeformPoints = [...freeformPoints, { x: e.clientX, y: e.clientY }];
       return;
     }
 
     currentX = e.clientX;
     currentY = e.clientY;
+
+    // Live word highlight while dragging inside the saved region (no rectangle spawned).
+    if (ocrSelecting && ocrResult) {
+      const rect = {
+        x: Math.min(startX, e.clientX),
+        y: Math.min(startY, e.clientY),
+        w: Math.abs(e.clientX - startX),
+        h: Math.abs(e.clientY - startY),
+      };
+      const { scaleX, scaleY } = getScale();
+      const ix0 = rect.x * scaleX - ocrOrigin.x;
+      const iy0 = rect.y * scaleY - ocrOrigin.y;
+      const ix1 = (rect.x + rect.w) * scaleX - ocrOrigin.x;
+      const iy1 = (rect.y + rect.h) * scaleY - ocrOrigin.y;
+      const picked = new Set<string>();
+      for (const w of ocrResult.words) {
+        const cx = (w.bbox.x0 + w.bbox.x1) / 2;
+        const cy = (w.bbox.y0 + w.bbox.y1) / 2;
+        const iw = Math.max(0, Math.min(w.bbox.x1, ix1) - Math.max(w.bbox.x0, ix0));
+        const ih = Math.max(0, Math.min(w.bbox.y1, iy1) - Math.max(w.bbox.y0, iy0));
+        const area = Math.max(1e-9, (w.bbox.x1 - w.bbox.x0) * (w.bbox.y1 - w.bbox.y0));
+        if ((cx >= ix0 && cx <= ix1 && cy >= iy0 && cy <= iy1) || (iw * ih) / area >= 0.3) picked.add(w.id);
+      }
+      ocrSelectedIds = picked;
+    }
+  }
+
+  function ocrCropCanvas(clientRect: { x: number; y: number; w: number; h: number }): HTMLCanvasElement | null {
+    const source = frozenCanvasEl;
+    if (!source || source.width === 0) return null;
+    const { scaleX, scaleY } = getScale();
+    const sx = Math.max(0, Math.round(clientRect.x * scaleX));
+    const sy = Math.max(0, Math.round(clientRect.y * scaleY));
+    const sw = Math.max(1, Math.round(clientRect.w * scaleX));
+    const sh = Math.max(1, Math.round(clientRect.h * scaleY));
+    const canvas = document.createElement('canvas');
+    canvas.width = sw;
+    canvas.height = sh;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, sw, sh);
+    ctx.drawImage(source, sx, sy, sw, sh, 0, 0, sw, sh);
+    return canvas;
+  }
+
+  async function runOverlayOcr(clientRect: { x: number; y: number; w: number; h: number }) {
+    const canvas = ocrCropCanvas(clientRect);
+    if (!canvas) {
+      ocrStatus = 'error';
+      ocrError = 'Capture not ready yet';
+      return;
+    }
+    const { scaleX, scaleY } = getScale();
+    const runId = ++ocrRunId;
+    ocrStatus = 'loading';
+    ocrProgress = 0;
+    ocrError = null;
+    ocrResult = null;
+    ocrSelectedIds = new Set();
+    try {
+      const cropped = await runOcr(canvas, { onProgress: (p) => { if (runId === ocrRunId) ocrProgress = p; } });
+      if (runId !== ocrRunId || !isOcrMode) return;
+      ocrOrigin = { x: Math.round(clientRect.x * scaleX), y: Math.round(clientRect.y * scaleY) };
+      ocrResult = cropped;
+      ocrStatus = cropped.words.length > 0 ? 'ready' : 'empty';
+    } catch (err) {
+      if (runId !== ocrRunId) return;
+      console.warn('Overlay OCR failed:', err);
+      ocrStatus = 'error';
+      ocrError = 'Scan failed — try again';
+    }
+  }
+
+  function handleOcrWordClick(clientX: number, clientY: number) {
+    if (!ocrResult) return;
+    const { scaleX, scaleY } = getScale();
+    const ix = clientX * scaleX - ocrOrigin.x;
+    const iy = clientY * scaleY - ocrOrigin.y;
+    const w = ocrResult.words.find((wd) => ix >= wd.bbox.x0 && ix <= wd.bbox.x1 && iy >= wd.bbox.y0 && iy <= wd.bbox.y1);
+    if (!w) return;
+    const next = new Set(ocrSelectedIds);
+    if (next.has(w.id)) next.delete(w.id); else next.add(w.id);
+    ocrSelectedIds = next;
   }
 
   async function handleMouseUp() {
@@ -467,6 +630,47 @@
       return;
     }
     if (!isDragging) return;
+
+    // Overlay OCR: inside region selects words; outside drags run OCR.
+    if (isOcrMode) {
+      const rect = {
+        x: Math.min(startX, currentX),
+        y: Math.min(startY, currentY),
+        w: Math.abs(currentX - startX),
+        h: Math.abs(currentY - startY),
+      };
+      const wasSelecting = ocrSelecting;
+      isDragging = false;
+      ocrSelecting = false;
+      if (wasSelecting && ocrResult) {
+        // Click toggles one word; drag selects intersecting words.
+        if (rect.w < 4 && rect.h < 4) {
+          handleOcrWordClick(startX, startY);
+        } else {
+          const { scaleX, scaleY } = getScale();
+          const ix0 = rect.x * scaleX - ocrOrigin.x;
+          const iy0 = rect.y * scaleY - ocrOrigin.y;
+          const ix1 = (rect.x + rect.w) * scaleX - ocrOrigin.x;
+          const iy1 = (rect.y + rect.h) * scaleY - ocrOrigin.y;
+          const picked = new Set<string>();
+          for (const w of ocrResult.words) {
+            const cx = (w.bbox.x0 + w.bbox.x1) / 2;
+            const cy = (w.bbox.y0 + w.bbox.y1) / 2;
+            const iw = Math.max(0, Math.min(w.bbox.x1, ix1) - Math.max(w.bbox.x0, ix0));
+            const ih = Math.max(0, Math.min(w.bbox.y1, iy1) - Math.max(w.bbox.y0, iy0));
+            const area = Math.max(1e-9, (w.bbox.x1 - w.bbox.x0) * (w.bbox.y1 - w.bbox.y0));
+            if ((cx >= ix0 && cx <= ix1 && cy >= iy0 && cy <= iy1) || (iw * ih) / area >= 0.3) picked.add(w.id);
+          }
+          ocrSelectedIds = picked;
+        }
+        return;
+      }
+      if (rect.w > 8 && rect.h > 8) {
+        ocrRect = rect;
+        void runOverlayOcr(rect);
+      }
+      return;
+    }
 
     if (currentSnipType === 'rectangle') {
       const rect = {
@@ -585,8 +789,23 @@
   }
 
   function handleTextActionsClick() {
+    // Select the OCR tool; dragging now OCRs a region in place.
+    // Do NOT capture — results stay on the frozen frame.
+    if (isOcrMode) {
+      exitOcrMode();
+      return;
+    }
+    isOcrMode = true;
+    ocrStatus = 'idle';
+    ocrResult = null;
+    ocrError = null;
+    ocrSelectedIds = new Set();
+    ocrRect = null;
+    ocrSelecting = false;
+    isPickingColor = false;
+    isSnipMenuOpen = false;
+    isDelayMenuOpen = false;
     onTextActions();
-    executeFullscreenCapture();
   }
 </script>
 
@@ -599,12 +818,24 @@
     if (e.key === 'Escape') {
       if (isPickingColor) {
         exitColorPicker();
+      } else if (isOcrMode) {
+        exitOcrMode();
       } else if (isSnipMenuOpen || isDelayMenuOpen) {
         isSnipMenuOpen = false;
         isDelayMenuOpen = false;
       } else if (active) {
         isCloseHovered = false;
         onClose();
+      }
+    }
+    if (isOcrMode && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+      e.preventDefault();
+      if (ocrResult) ocrSelectedIds = new Set(ocrResult.words.map((w) => w.id));
+    }
+    if (isOcrMode && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
+      if (ocrSelectedIds.size > 0 && ocrResult) {
+        e.preventDefault();
+        void copyOcrText(ocrResult.words.filter((w) => ocrSelectedIds.has(w.id)).sort((a, b) => a.bbox.y0 - b.bbox.y0 || a.bbox.x0 - b.bbox.x0).map((w) => w.text).join(' '));
       }
     }
   }}
@@ -616,7 +847,7 @@
   <div
     class="fixed inset-0 z-50 select-none overflow-hidden"
     class:opacity-0={!visible}
-    style={isPickingColor ? 'cursor: none !important;' : 'cursor: crosshair !important;'}
+    style={isPickingColor ? 'cursor: none !important;' : ocrHoverText ? 'cursor: text !important;' : 'cursor: crosshair !important;'}
     onmousedown={handleMouseDown}
     onmousemove={handleMouseMove}
     onmouseup={handleMouseUp}
@@ -635,7 +866,7 @@
       <defs>
         <mask id="snip-cutout-mask">
           <rect width="100%" height="100%" fill="white" />
-          {#if currentSnipType === 'rectangle' && selectionRect !== null}
+          {#if (currentSnipType === 'rectangle' || isOcrMode) && selectionRect !== null}
             <rect
               x={selectionRect.x}
               y={selectionRect.y}
@@ -669,7 +900,7 @@
       />
 
       <!-- Rectangle Mode Border -->
-      {#if currentSnipType === 'rectangle' && selectionRect !== null}
+      {#if (currentSnipType === 'rectangle' || isOcrMode) && selectionRect !== null}
         <rect
           x={selectionRect.x}
           y={selectionRect.y}
@@ -707,7 +938,7 @@
     </svg>
 
     <!-- Dimension Badge (Rectangle Mode) -->
-    {#if currentSnipType === 'rectangle' && selectionRect !== null}
+    {#if (currentSnipType === 'rectangle' || isOcrMode) && selectionRect !== null}
       {@const { scaleX, scaleY } = getScale()}
       <div
         class="absolute pointer-events-none bg-black/80 text-white text-[11px] font-mono px-2 py-0.5 rounded shadow-md border border-white/10"
@@ -718,13 +949,58 @@
     {/if}
 
     <!-- Window Badge (Window Mode) -->
-    {#if currentSnipType === 'window' && clientHoveredWindow !== null && hoveredWindow !== null}
+    {#if currentSnipType === 'window' && !isOcrMode && clientHoveredWindow !== null && hoveredWindow !== null}
       <div
         class="absolute pointer-events-none bg-black/85 text-white text-[11px] font-medium px-2 py-0.5 rounded shadow-md border border-white/15 max-w-[320px] truncate"
         style="left: {Math.max(12, clientHoveredWindow.x)}px; top: {Math.max(12, clientHoveredWindow.y - 26)}px;"
       >
         {hoveredWindow.title || 'Application Window'} ({Math.round(hoveredWindow.width)} × {Math.round(hoveredWindow.height)})
       </div>
+    {/if}
+
+    <!-- Overlay OCR: persistent border + highlighted words (no panel) -->
+    {#if isOcrMode && ocrRect !== null && ocrStatus !== 'loading'}
+      <div
+        class="absolute pointer-events-none border border-[#0067c0]"
+        style="left: {ocrRect.x}px; top: {ocrRect.y}px; width: {ocrRect.w}px; height: {ocrRect.h}px;"
+      ></div>
+    {/if}
+    {#if isOcrMode && ocrStatus === 'ready' && ocrResult}
+      {@const { scaleX: oxScaleX, scaleY: oxScaleY } = getScale()}
+      {#each ocrResult.words as w}
+        {@const sel = ocrSelectedIds.has(w.id)}
+        <div
+          class="absolute pointer-events-none rounded-[2px] {sel ? 'bg-[#0067c0]/60' : 'bg-[#0067c0]/25'}"
+          style="left: {(ocrOrigin.x + w.bbox.x0) / oxScaleX}px; top: {(ocrOrigin.y + w.bbox.y0) / oxScaleY}px; width: {Math.max(2, (w.bbox.x1 - w.bbox.x0) / oxScaleX)}px; height: {Math.max(2, (w.bbox.y1 - w.bbox.y0) / oxScaleY)}px;"
+          title={w.text}
+          aria-hidden="true"
+        ></div>
+      {/each}
+    {/if}
+    {#if isOcrMode && ocrStatus === 'loading' && ocrRect !== null}
+      <div class="absolute pointer-events-none border border-[#0067c0]" style="left: {ocrRect.x}px; top: {ocrRect.y}px; width: {ocrRect.w}px; height: {ocrRect.h}px;">
+        <div class="absolute inset-x-0 bottom-0 h-0.5 bg-white/20"><div class="h-full bg-white transition-all" style="width: {Math.round((ocrProgress || 0.05) * 100)}%;"></div></div>
+      </div>
+    {/if}
+    <!-- Compact copy pill anchored to the region (no bottom sheet) -->
+    {#if isOcrMode && ocrStatus === 'ready' && ocrResult && ocrRect !== null}
+      {@const currentResult = ocrResult}
+      <div
+        class="absolute z-50 flex items-center gap-1 rounded-[10px] border border-black/[0.08] bg-[#fdfdfd] p-1 shadow-[0_8px_32px_rgba(0,0,0,0.4)] dark:bg-[#161b26]"
+        style="left: {ocrRect.x + ocrRect.w - 150}px; top: {Math.min(window.innerHeight - 56, ocrRect.y + ocrRect.h + 8)}px;"
+        onmousedown={(e) => e.stopPropagation()}
+      >
+        <button type="button" class="flex h-8 items-center gap-1 rounded-[6px] px-2 text-[11px] hover:bg-black/[0.05] dark:hover:bg-white/[0.06] cursor-pointer" title="Copy all" onclick={() => copyOcrText(currentResult.plainText)}><Copy class="w-3.5 h-3.5" />Copy</button>
+        <button type="button" class="flex h-8 items-center gap-1 rounded-[6px] px-2 text-[11px] hover:bg-black/[0.05] dark:hover:bg-white/[0.06] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer" title={currentResult.hasTable ? 'Copy as table' : 'No table detected'} disabled={!currentResult.hasTable} onclick={() => copyOcrText(currentResult.tableTsv)}><Table2 class="w-3.5 h-3.5" />Table</button>
+        <button type="button" class="flex h-8 items-center rounded-[6px] px-2 text-[11px] hover:bg-black/[0.05] dark:hover:bg-white/[0.06] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer" title="Copy selection" disabled={ocrSelectedIds.size === 0} onclick={() => {
+          const sorted = currentResult.words.filter((w) => ocrSelectedIds.has(w.id)).sort((a, b) => a.bbox.y0 - b.bbox.y0 || a.bbox.x0 - b.bbox.x0);
+          copyOcrText(sorted.map((w) => w.text).join(' '));
+        }}>Sel</button>
+        <button type="button" class="flex h-8 items-center rounded-[6px] px-2 text-[11px] hover:bg-black/[0.05] dark:hover:bg-white/[0.06] cursor-pointer" title="Select all" onclick={() => { ocrSelectedIds = new Set(currentResult.words.map((w) => w.id)); }}>All</button>
+      </div>
+      {#if ocrToast}
+        <div class="absolute z-50 -translate-x-1/2 rounded-full bg-black/85 px-2.5 py-1 text-[11px] text-white" style="left: {ocrRect.x + ocrRect.w / 2}px; top: {ocrRect.y + ocrRect.h + 44}px;">{ocrToast}</div>
+      {/if}
     {/if}
 
     <!-- Floating capture toolbar pill (Matching Reference, Draggable) -->
@@ -869,9 +1145,10 @@
       <!-- 6. Text Actions / OCR Tool -->
       <button
         type="button"
-        class="w-8 h-8 rounded-[6px] hover:bg-black/[0.05] dark:hover:bg-white/[0.06] flex items-center justify-center text-neutral-700 dark:text-neutral-200 transition-colors cursor-pointer"
+        aria-pressed={isOcrMode}
+        class="w-8 h-8 rounded-[6px] flex items-center justify-center transition-colors cursor-pointer {isOcrMode ? 'bg-[#0067c0] text-white' : 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-200'}"
         onclick={handleTextActionsClick}
-        title="Text actions (OCR)"
+        title={isOcrMode ? 'OCR: drag to scan a region (Esc to exit)' : 'Text actions (OCR)'}
       >
         <ScanText class="w-4 h-4 stroke-[1.8]" />
       </button>

@@ -27,7 +27,10 @@
   import { playTimerChime } from './lib/audio';
   import { clampZoom, zoomIn, zoomOut } from './lib/viewport';
   import { clampHighlighterSize } from './lib/highlighter';
-  import { copyImageToClipboard } from './lib/clipboard';
+  import { copyImageToClipboard, copyTextToClipboard } from './lib/clipboard';
+  import type { ScanRect, ScanResult } from './lib/scan-text';
+  import { marqueeSelect, selectionToPlainText } from './lib/scan-text';
+  import { cancelOcr, runOcr } from './lib/scan-text-runner';
   import { settings } from './lib/settings.svelte';
   import { applyCaptureOutline } from './lib/outline';
   import { normalizeTouchWriting } from './lib/touch-writing';
@@ -176,6 +179,14 @@
   let draftingTool = $state<DraftingTool>('off');
   let zoom = $state(100);
   let isCropping = $state(false);
+  // Phase 21: Scan Text (OCR) modal overlay state.
+  let isScanActive = $state(false);
+  let scanResult = $state<ScanResult | null>(null);
+  let scanSelectedIds = $state<Set<string>>(new Set());
+  let scanStatus = $state<'idle' | 'loading' | 'ready' | 'empty' | 'error'>('idle');
+  let scanProgress = $state(0);
+  let scanError = $state<string | null>(null);
+  let scanRunId = 0;
 
   // Canvas viewport handoff for zoom, fit, and composited exports.
   let canvasArea = $state<CanvasAreaApi | null>(null);
@@ -215,12 +226,14 @@
   const redoLabel = $derived(historyState.redoLabel);
 
   function handleHistoryPush(label: string, before: HistorySnapshot, after: HistorySnapshot) {
+    clearScanOnMutate();
     history.push(label, copySnapshot(before), copySnapshot(after));
     refreshHistoryState();
   }
 
   // Crop is a history boundary — Undo never crosses it.
   function handleHistoryBoundary() {
+    clearScanOnMutate();
     history.clear();
     refreshHistoryState();
   }
@@ -247,6 +260,7 @@
   }
 
   function handleUndo() {
+    clearScanOnMutate();
     const snapshot = history.undo();
     if (snapshot && canvasArea) {
       canvasArea.restoreSnapshot(snapshot.data, snapshot.width, snapshot.height, snapshot.model);
@@ -256,6 +270,7 @@
   }
 
   function handleRedo() {
+    clearScanOnMutate();
     const snapshot = history.redo();
     if (snapshot && canvasArea) {
       canvasArea.restoreSnapshot(snapshot.data, snapshot.width, snapshot.height, snapshot.model);
@@ -304,6 +319,14 @@
     isCropping = false;
     emojiGlyph = null;
     draftingTool = 'off';
+    // Phase 21: new documents never inherit scan boxes.
+    isScanActive = false;
+    scanResult = null;
+    scanSelectedIds = new Set();
+    scanStatus = 'idle';
+    scanError = null;
+    scanRunId += 1;
+    void cancelOcr();
   }
 
   function handleFileSelect(e: Event) {
@@ -519,6 +542,7 @@
 
   function handleCanvasMutated() {
     hasUnsavedEdits = true;
+    clearScanOnMutate();
     if (!autoCopy || !activeTab) return;
 
     autoCopyTabId = activeTabId;
@@ -552,6 +576,7 @@
   }
 
   async function closeTabNow(id: string) {
+    if (id === activeTabId) exitScanMode();
     historyByTab.delete(id);
     hasUnsavedEdits = false;
     if (lastHistoryTabId === id) lastHistoryTabId = '__closed__';
@@ -1286,9 +1311,110 @@
     canvasArea?.fitToViewport();
   }
 
+  // Phase 21: Scan Text helpers (modal overlay, not a drawing tool).
+  function exitScanMode(message?: string) {
+    isScanActive = false;
+    scanResult = null;
+    scanSelectedIds = new Set();
+    scanStatus = 'idle';
+    scanError = null;
+    scanProgress = 0;
+    scanRunId += 1;
+    void cancelOcr();
+    if (message) announce(message);
+  }
+
+  function clearScanOnMutate() {
+    if (!isScanActive) return;
+    exitScanMode('Image changed — scan cleared');
+  }
+
+  async function runScan(): Promise<void> {
+    const source = canvasArea?.getScanSourceCanvas?.(2000) ?? null;
+    if (!source) {
+      scanStatus = 'error';
+      scanError = 'No image to scan';
+      announce('No image to scan');
+      return;
+    }
+    const runId = ++scanRunId;
+    scanStatus = 'loading';
+    scanProgress = 0;
+    scanError = null;
+    scanSelectedIds = new Set();
+    announce('Scanning for text');
+    try {
+      const result = await runOcr(source, { onProgress: (p) => { if (runId === scanRunId && isScanActive) scanProgress = p; } });
+      if (runId !== scanRunId || !isScanActive) return;
+      scanResult = result;
+      scanStatus = result.words.length > 0 ? 'ready' : 'empty';
+      announce(result.words.length > 0 ? `Found ${result.words.length} words` : 'No text detected');
+    } catch (err) {
+      if (runId !== scanRunId || !isScanActive) return;
+      console.warn('Scan Text failed:', err);
+      scanStatus = 'error';
+      scanError = 'Scan failed — try again';
+      announce('Scan failed');
+    }
+  }
+
   function handleTriggerOcr() {
-    activeTool = 'text';
-    handleTriggerNew();
+    const hasImageTab = view === 'editor' && tabs.length > 0;
+    if (!hasImageTab) return;
+    if (isScanActive) {
+      exitScanMode();
+      announce('Scan Text off');
+      return;
+    }
+    if (isCropping) {
+      isCropping = false;
+    }
+    isScanActive = true;
+    void runScan();
+  }
+
+  async function copyScanText(text: string, emptyMsg: string) {
+    if (!text) {
+      announce(emptyMsg);
+      showCopyToast(false, emptyMsg);
+      return;
+    }
+    const result = await copyTextToClipboard(text);
+    if (result.ok) {
+      announce('Text copied to clipboard');
+      showCopyToast(true, 'Text copied');
+    } else {
+      console.warn('Text clipboard failed:', result.error);
+      announce('Could not copy text to clipboard');
+      showCopyToast(false, 'Copy failed');
+    }
+  }
+
+  function copySelectionText() {
+    if (!scanResult) return;
+    const text = selectionToPlainText(scanResult.words, scanSelectedIds, scanResult.lines, scanResult.blocks);
+    void copyScanText(text, 'No text selected');
+  }
+
+  function handleCopyAllText() {
+    const text = scanResult?.plainText ?? '';
+    void copyScanText(text, 'No text detected');
+  }
+
+  function handleCopyAsTable() {
+    const text = scanResult?.tableTsv ?? '';
+    void copyScanText(text, 'No table detected');
+  }
+
+  function handleScanSelectAll() {
+    if (!scanResult) return;
+    scanSelectedIds = new Set(scanResult.words.map((w) => w.id));
+    if (scanResult.words.length > 0) announce(`Selected ${scanResult.words.length} words`);
+  }
+
+  function handleScanMarquee(rect: ScanRect) {
+    if (!scanResult) return;
+    scanSelectedIds = marqueeSelect(scanResult.words, rect, 'intersect');
   }
 
   async function triggerFullscreenCapture() {
@@ -1457,10 +1583,29 @@
       return;
     }
 
+    // Phase 21: Ctrl+C in Scan Text mode copies words; outside it copies the image.
+    if (hasImageTab && isScanActive && modifier && e.key.toLowerCase() === 'c') {
+      e.preventDefault();
+      if (scanSelectedIds.size > 0) {
+        copySelectionText();
+      } else {
+        announce('Select text first');
+        showCopyToast(false, 'Select text first');
+      }
+      return;
+    }
+
     // Ctrl + C: copy the flattened composite bitmap
     if (hasImageTab && modifier && e.key.toLowerCase() === 'c') {
       e.preventDefault();
       void copyComposite();
+      return;
+    }
+
+    // Phase 21: Ctrl+A selects all words in Scan Text mode.
+    if (hasImageTab && isScanActive && modifier && e.key.toLowerCase() === 'a') {
+      e.preventDefault();
+      handleScanSelectAll();
       return;
     }
 
@@ -1471,12 +1616,22 @@
       return;
     }
 
-    // Ctrl+R: toggle the crown (ruler) overlay. Scan Text is Phase 21 and
-    // not built yet, so the dual binding always resolves to the ruler.
+    // Ctrl+R: ruler toggle outside Scan Text; suppressed inside it
+    // (Manual Redact is Phase 22 — this phase only suppresses the ruler).
+    if (hasImageTab && isScanActive && modifier && e.key.toLowerCase() === 'r') {
+      e.preventDefault();
+      return;
+    }
     if (hasImageTab && modifier && e.key.toLowerCase() === 'r') {
       e.preventDefault();
       draftingTool = draftingTool === 'ruler' ? 'off' : 'ruler';
       announce(draftingTool === 'ruler' ? 'Ruler shown' : 'Ruler hidden');
+      return;
+    }
+
+    if (hasImageTab && isScanActive && e.key === 'Escape') {
+      e.preventDefault();
+      exitScanMode();
       return;
     }
 
@@ -1501,12 +1656,14 @@
       if (key === '1' || key === 'n') { e.preventDefault(); handleTriggerNew(); return; }
       if (key === 't') { e.preventDefault(); touchWritingEnabled = !touchWritingEnabled; return; }
       if (!hasImageTab) { /* editor tools have no target without an image */ }
-      else if (key === 'b') { e.preventDefault(); activeTool = 'pen'; emojiGlyph = null; isCropping = false; return; }
-      else if (key === 'h') { e.preventDefault(); activeTool = 'highlighter'; emojiGlyph = null; isCropping = false; return; }
-      else if (key === 'e') { e.preventDefault(); activeTool = 'eraser'; emojiGlyph = null; isCropping = false; return; }
+      else if (key === 'x') { e.preventDefault(); handleTriggerOcr(); return; }
+      else if (key === 'b') { e.preventDefault(); exitScanMode(); activeTool = 'pen'; emojiGlyph = null; isCropping = false; return; }
+      else if (key === 'h') { e.preventDefault(); exitScanMode(); activeTool = 'highlighter'; emojiGlyph = null; isCropping = false; return; }
+      else if (key === 'e') { e.preventDefault(); exitScanMode(); activeTool = 'eraser'; emojiGlyph = null; isCropping = false; return; }
       if (key === 'i') {
         e.preventDefault();
         if (hasImageTab) {
+          exitScanMode();
           isCropping = !isCropping;
           if (isCropping) { activeTool = 'select'; emojiGlyph = null; }
         }
@@ -1555,7 +1712,7 @@
         {activeTabId}
         {theme}
         onRequestClose={requestWindowClose}
-        onSelectTab={(id) => { activeTabId = id; hasUnsavedEdits = false; view = 'editor'; }}
+        onSelectTab={(id) => { if (id !== activeTabId) exitScanMode(); activeTabId = id; hasUnsavedEdits = false; view = 'editor'; }}
         onCloseTab={handleCloseTab}
         onNewTab={handleNewTab}
       />
@@ -1596,10 +1753,12 @@
         }}
         onTriggerNew={handleTriggerNew}
         onTriggerOcr={handleTriggerOcr}
+        {isScanActive}
         onModeChange={handleModeChange}
         onSnipTypeChange={handleSnipTypeChange}
         onDelayChange={handleDelayChange}
         onToolChange={(t) => {
+          if (isScanActive) exitScanMode();
           activeTool = t;
           if (t !== 'shapes') emojiGlyph = null;
           if (t !== 'select') isCropping = false;
@@ -1625,6 +1784,7 @@
         {openFlyoutSignal}
         onPrint={handlePrint}
         onToggleCrop={() => {
+          if (isScanActive) exitScanMode();
           isCropping = !isCropping;
           if (isCropping) {
             activeTool = 'select';
@@ -1642,6 +1802,14 @@
       <SecondaryToolbar
         {activeTool}
         {isCropping}
+        {isScanActive}
+        scanBusy={scanStatus === 'loading'}
+        scanHasText={(scanResult?.words.length ?? 0) > 0}
+        scanHasTable={scanResult?.hasTable ?? false}
+        scanWordCount={scanResult?.words.length ?? 0}
+        onCopyAllText={handleCopyAllText}
+        onCopyAsTable={handleCopyAsTable}
+        onExitScan={() => exitScanMode()}
         hasImage={view === 'editor' && tabs.length > 0}
         {shapeKind}
         {shapeFillColor}
@@ -1720,6 +1888,18 @@
           draftingTool={draftingTool}
           {touchWritingEnabled}
           {isCropping}
+          {isScanActive}
+          scanWords={scanResult?.words ?? []}
+          {scanSelectedIds}
+          {scanStatus}
+          {scanProgress}
+          {scanError}
+          onScanMarquee={handleScanMarquee}
+          onScanClearSelection={() => { scanSelectedIds = new Set(); }}
+          onScanCancel={() => exitScanMode()}
+          onScanRetry={() => { isScanActive = true; void runScan(); }}
+          onScanCopySelection={() => copySelectionText()}
+          onScanSelectAll={() => handleScanSelectAll()}
           onApplyCrop={() => isCropping = false}
           onCancelCrop={() => isCropping = false}
           onZoomChange={handleCanvasZoom}

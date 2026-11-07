@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { Check, Minus, Plus, X } from '@lucide/svelte';
+  import { Check, Minus, Plus, X, Copy } from '@lucide/svelte';
   import type { ToolType } from '../types';
+  import type { OcrWord, ScanRect } from '../scan-text';
+  import { marqueeSelect, wordAtPoint } from '../scan-text';
   import { pixelLinePoints } from '../drawing';
   import { detectHeldShape, type HeldShape, type StrokePoint } from '../hold-snap';
   import { registerPinchBridge, type PinchPhase } from '../pinch';
@@ -75,6 +77,8 @@
     zoomToSliderPosition,
   } from '../viewport';
 
+  type ScanStatus = 'idle' | 'loading' | 'ready' | 'empty' | 'error';
+
   let {
     imageUrl = '',
     width = 960,
@@ -105,6 +109,19 @@
     isCropping = false,
     onApplyCrop = () => {},
     onCancelCrop = () => {},
+    /** Phase 21: Scan Text overlay state & callbacks. */
+    isScanActive = false,
+    scanWords = [],
+    scanSelectedIds = new Set<string>(),
+    scanStatus = 'idle' as ScanStatus,
+    scanProgress = 0,
+    scanError = null as string | null,
+    onScanMarquee = (_rect: ScanRect) => {},
+    onScanClearSelection = () => {},
+    onScanCancel = () => {},
+    onScanRetry = () => {},
+    onScanCopySelection = () => {},
+    onScanSelectAll = () => {},
     onZoomChange = (z: number) => {},
     onImageReady = () => {},
     onCanvasMutated = () => {},
@@ -145,6 +162,19 @@
     isCropping: boolean;
     onApplyCrop: () => void;
     onCancelCrop: () => void;
+    /** Phase 21: Scan Text overlay state & callbacks. */
+    isScanActive?: boolean;
+    scanWords?: OcrWord[];
+    scanSelectedIds?: Set<string>;
+    scanStatus?: ScanStatus;
+    scanProgress?: number;
+    scanError?: string | null;
+    onScanMarquee?: (rect: ScanRect) => void;
+    onScanClearSelection?: () => void;
+    onScanCancel?: () => void;
+    onScanRetry?: () => void;
+    onScanCopySelection?: () => void;
+    onScanSelectAll?: () => void;
     onZoomChange?: (z: number) => void;
     onImageReady?: () => void;
     onCanvasMutated?: () => void;
@@ -185,6 +215,11 @@
   let draftingX = $state(200);
   let draftingY = $state(200);
   let draftingAngle = $state(0);
+
+  // Phase 21: Scan Text marquee drag + context menu (image coords).
+  let scanDrag = $state<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  let scanDragStart = $state<{ x: number; y: number } | null>(null);
+  let scanMenu = $state<{ x: number; y: number } | null>(null);
 
   // Phase 14: the active crop frame (full canvas by default, reset on load).
   let cropRect = $state<CropRect>(fullCropRect(960, 540));
@@ -2118,6 +2153,19 @@
     // the frame handles (which stop propagation) move the rectangle.
     if (isCropping) return;
 
+    // Phase 21: Scan Text — marquee selection replaces markup/pan.
+    if (isScanActive) {
+      if (scanMenu) { scanMenu = null; return; }
+      if (e.button !== 0 && e.button !== 1) return;
+      if (!isInsideCanvas(e.clientX, e.clientY)) return;
+      e.preventDefault();
+      const pt = clientToImage(e.clientX, e.clientY);
+      scanDragStart = { x: pt.x, y: pt.y };
+      scanDrag = { x0: pt.x, y0: pt.y, x1: pt.x, y1: pt.y };
+      capturePointer(e.pointerId);
+      return;
+    }
+
     if (e.pointerType === 'touch') {
       e.preventDefault();
       touchPoints.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -2171,6 +2219,12 @@
   }
 
   function handleViewportPointerMove(e: PointerEvent) {
+    // Phase 21: Scan Text marquee tracking.
+    if (isScanActive && scanDrag && scanDragStart) {
+      const pt = clientToImage(e.clientX, e.clientY);
+      scanDrag = { ...scanDrag, x1: pt.x, y1: pt.y };
+      return;
+    }
     if (e.pointerType === 'touch') {
       if (emojiDrag || cropDrag) {
         e.preventDefault();
@@ -2222,6 +2276,27 @@
 
   function handleViewportPointerUp(e: PointerEvent) {
     releasePointer(e.pointerId);
+
+    // Phase 21: finalize scan marquee (click = single word, drag = marquee).
+    if (isScanActive && scanDrag && scanDragStart) {
+      const rect: ScanRect = { x0: scanDrag.x0, y0: scanDrag.y0, x1: scanDrag.x1, y1: scanDrag.y1 };
+      const dist = Math.hypot(scanDrag.x1 - scanDragStart.x, scanDrag.y1 - scanDragStart.y);
+      if (dist < 4) {
+        const w = wordAtPoint(scanWords, scanDragStart.x, scanDragStart.y);
+        if (w) {
+          onScanMarquee({ x0: w.bbox.x0 - 2, y0: w.bbox.y0 - 2, x1: w.bbox.x1 + 2, y1: w.bbox.y1 + 2 });
+        } else {
+          onScanClearSelection();
+        }
+      } else {
+        // Touch intersect check happens App-side via marqueeSelect; forward rect.
+        void marqueeSelect;
+        onScanMarquee(rect);
+      }
+      scanDrag = null;
+      scanDragStart = null;
+      return;
+    }
 
     if (e.pointerType === 'touch') {
       touchPoints.delete(e.pointerId);
@@ -2325,6 +2400,22 @@
   /** Returns the flattened composite canvas (base capture plus all markup). */
   export function compositeCanvas(): HTMLCanvasElement | null {
     return canvasEl;
+  }
+
+  /** Phase 21: snapshot of the composite for OCR (originals preserved). */
+  export function getScanSourceCanvas(maxEdge = 2000): HTMLCanvasElement | null {
+    if (!canvasEl || canvasEl.width <= 0 || canvasEl.height <= 0) return null;
+    const src = canvasEl;
+    const scale = Math.min(1, maxEdge / Math.max(src.width, src.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(src.width * scale));
+    canvas.height = Math.max(1, Math.round(src.height * scale));
+    const ctx2 = canvas.getContext('2d');
+    if (!ctx2) return src;
+    ctx2.fillStyle = '#ffffff';
+    ctx2.fillRect(0, 0, canvas.width, canvas.height);
+    ctx2.drawImage(src, 0, 0, canvas.width, canvas.height);
+    return canvas;
   }
 
   /** Returns the flattened composite bitmap (base capture plus all markup). */
@@ -2433,6 +2524,11 @@
   onpointercancel={handleViewportPointerUp}
   onmousedown={blockMiddleButton}
   onauxclick={blockMiddleButton}
+  oncontextmenu={(e) => {
+    if (!isScanActive) return;
+    e.preventDefault();
+    scanMenu = { x: e.clientX, y: e.clientY };
+  }}
 >
   <!-- Interactive Viewport Wrapper with True Zoom Sizing -->
   <div
@@ -2579,6 +2675,48 @@
       </div>
     {/if}
 
+    <!-- Phase 21: Scan Text overlay (dim + selectable word boxes + marquee) -->
+    {#if isScanActive}
+      {@const sScale = zoom / 100}
+      {#if scanStatus === 'ready' || scanStatus === 'empty'}
+        <div class="absolute inset-0 bg-black/[0.35] pointer-events-none" style="width: {displayWidth}px; height: {displayHeight}px;"></div>
+      {/if}
+      {#if scanStatus === 'ready'}
+        {#each scanWords as w}
+          {@const sel = scanSelectedIds.has(w.id)}
+          <div
+            class="absolute pointer-events-none rounded-sm {sel ? 'bg-[#0067c0]/35 border border-[#0067c0]' : 'border border-[#60cdff]/50 bg-white/5'}"
+            style="left: {w.bbox.x0 * sScale}px; top: {w.bbox.y0 * sScale}px; width: {Math.max(2, (w.bbox.x1 - w.bbox.x0) * sScale)}px; height: {Math.max(2, (w.bbox.y1 - w.bbox.y0) * sScale)}px;"
+            title={w.text}
+            aria-hidden="true"
+          ></div>
+        {/each}
+      {/if}
+      {#if scanDrag && scanDragStart}
+        {@const mx0 = Math.min(scanDrag.x0, scanDrag.x1) * sScale}
+        {@const my0 = Math.min(scanDrag.y0, scanDrag.y1) * sScale}
+        {@const mw = Math.abs(scanDrag.x1 - scanDrag.x0) * sScale}
+        {@const mh = Math.abs(scanDrag.y1 - scanDrag.y0) * sScale}
+        <div class="absolute pointer-events-none border border-dashed border-[#0067c0] bg-[#0067c0]/20" style="left: {mx0}px; top: {my0}px; width: {mw}px; height: {mh}px;"></div>
+      {/if}
+      {#if scanStatus === 'loading'}
+        <div class="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/40 text-white" style="width: {displayWidth}px; height: {displayHeight}px;">
+          <div class="text-xs font-medium">Scanning for text…</div>
+          <div class="w-48 h-1.5 rounded bg-white/20 overflow-hidden"><div class="h-full bg-white transition-all" style="width: {Math.round((scanProgress || 0.05) * 100)}%;"></div></div>
+          <button type="button" class="rounded-md bg-white/15 px-3 py-1 text-xs hover:bg-white/25 cursor-pointer" onclick={onScanCancel}>Cancel</button>
+        </div>
+      {:else if scanStatus === 'empty'}
+        <div class="absolute inset-0 flex items-center justify-center text-white" style="width: {displayWidth}px; height: {displayHeight}px;">
+          <span class="rounded-full bg-black/50 px-3 py-1.5 text-xs">No text detected</span>
+        </div>
+      {:else if scanStatus === 'error'}
+        <div class="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/45 text-white" style="width: {displayWidth}px; height: {displayHeight}px;">
+          <span class="text-xs">{scanError || 'Scan failed'}</span>
+          <button type="button" class="rounded-md bg-white/15 px-3 py-1 text-xs hover:bg-white/25 cursor-pointer" onclick={onScanRetry}>Retry</button>
+        </div>
+      {/if}
+    {/if}
+
     <!-- Phase 18: draggable ruler overlay -->
     <DraftingOverlay
       tool={draftingTool}
@@ -2640,4 +2778,14 @@
     onkeydown={handleZoomInputKeyDown}
   />
 </div>
+
+<!-- Phase 21: Scan Text context menu (Copy text / Select all / Redact disabled) -->
+{#if scanMenu}
+  <div class="fixed inset-0 z-40" onpointerdown={() => { scanMenu = null; }} oncontextmenu={(e) => { e.preventDefault(); scanMenu = null; }} role="presentation"></div>
+  <div class="fixed z-50 min-w-[160px] rounded-lg border border-black/10 bg-white py-1 shadow-xl dark:border-white/10 dark:bg-[#181d28]" style="left: {scanMenu.x}px; top: {scanMenu.y}px;" role="menu" aria-label="Scan text menu">
+    <button type="button" class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer" role="menuitem" disabled={scanSelectedIds.size === 0} onclick={() => { scanMenu = null; onScanCopySelection(); }}><Copy class="w-3.5 h-3.5" /> Copy text <kbd class="ml-auto text-[10px] font-mono text-neutral-400">Ctrl+C</kbd></button>
+    <button type="button" class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer" role="menuitem" onclick={() => { scanMenu = null; onScanSelectAll(); }}>Select all <kbd class="ml-auto text-[10px] font-mono text-neutral-400">Ctrl+A</kbd></button>
+    <button type="button" class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-neutral-400 cursor-not-allowed" role="menuitem" disabled title="Available in a later phase">Redact text</button>
+  </div>
+{/if}
 </div>

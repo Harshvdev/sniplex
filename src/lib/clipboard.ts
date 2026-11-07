@@ -40,6 +40,24 @@ async function copyWithBrowserClipboard(blob: Blob): Promise<void> {
   await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
 }
 
+/**
+ * Phase 21: copies plain text to the system clipboard (Scan Text mode).
+ * Uses the Web Clipboard API; failures are reported as a result object
+ * so the caller can keep the selection intact and announce the failure.
+ */
+export async function copyTextToClipboard(text: string): Promise<ClipboardCopyResult> {
+  if (!text) return { ok: false, error: 'Nothing to copy' };
+  try {
+    if (typeof navigator === 'undefined' || !navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+      throw new Error('Text clipboard access is not available');
+    }
+    await navigator.clipboard.writeText(text);
+    return { ok: true, method: 'browser' };
+  } catch (error) {
+    return { ok: false, error: errorMessage(error) };
+  }
+}
+
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Square, Circle, Minus, ArrowUpRight, Ban, Smile, Check, X } from '@lucide/svelte';
+  import { Square, Circle, Minus, ArrowUpRight, Ban, Smile, Check, X, Copy, Table2 } from '@lucide/svelte';
   import type { ShapeKind, ToolType } from '../types';
   import { EMOJI_PALETTE, SHAPE_MAX_WIDTH, SHAPE_MIN_WIDTH } from '../shapes';
   import { TEXT_FONT_FAMILIES, TEXT_MAX_SIZE, TEXT_MIN_SIZE, type TextAlign } from '../text-label';
@@ -43,11 +43,28 @@
     // Crop
     onApplyCrop = () => {},
     onCancelCrop = () => {},
+    /** Phase 21: Scan Text secondary toolbar. */
+    isScanActive = false,
+    scanBusy = false,
+    scanHasText = false,
+    scanHasTable = false,
+    scanWordCount = 0,
+    onCopyAllText = () => {},
+    onCopyAsTable = () => {},
+    onExitScan = () => {},
   }: {
     activeTool: ToolType;
     isCropping: boolean;
     /** Secondary options only exist once a capture is loaded. */
     hasImage: boolean;
+    isScanActive?: boolean;
+    scanBusy?: boolean;
+    scanHasText?: boolean;
+    scanHasTable?: boolean;
+    scanWordCount?: number;
+    onCopyAllText?: () => void;
+    onCopyAsTable?: () => void;
+    onExitScan?: () => void;
     shapeKind: ShapeKind;
     shapeFillColor: string;
     shapeFillOpacity: number;
@@ -108,7 +125,22 @@
 
 <svelte:window onpointerdown={closeOnOutside} />
 
-{#if hasImage && isCropping}
+{#if hasImage && isScanActive}
+  <div class="flex min-h-10 flex-wrap items-center gap-2 border-b border-black/[0.06] bg-[#fdfdfd] px-3 py-1 dark:border-white/[0.07] dark:bg-[#161b26] text-xs" data-testid="secondary-toolbar-scan">
+    <button type="button" class="flex items-center gap-1.5 rounded-md bg-[#0067c0] px-3 py-1 text-white font-medium hover:bg-[#1070c7] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer" onclick={onCopyAllText} disabled={!scanHasText || scanBusy}>
+      <Copy class="w-3.5 h-3.5" /> Copy all text
+    </button>
+    <button type="button" class="flex items-center gap-1.5 rounded-md px-3 py-1 hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer" onclick={onCopyAsTable} disabled={!scanHasTable || scanBusy} title={scanHasTable ? 'Copy table as TSV' : 'No table detected'}>
+      <Table2 class="w-3.5 h-3.5" /> Copy as table
+    </button>
+    <button type="button" class="flex items-center gap-1.5 rounded-md px-3 py-1 text-neutral-400 cursor-not-allowed opacity-60" disabled title="Available in a later phase">
+      Quick redact
+    </button>
+    <div class="h-4 w-px bg-black/10 dark:bg-white/10"></div>
+    <span class="text-neutral-400">{scanBusy ? 'Scanning…' : scanHasText ? `${scanWordCount} words · drag to select · Ctrl+C copies · Ctrl+A selects all` : 'No text yet — scanning or empty'}</span>
+    <button type="button" class="ml-auto flex items-center gap-1.5 rounded-md px-2 py-1 hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer" onclick={onExitScan}><X class="w-3.5 h-3.5" /> Exit</button>
+  </div>
+{:else if hasImage && isCropping}
   <div class="flex h-10 items-center gap-2 border-b border-black/[0.06] bg-[#fdfdfd] px-3 dark:border-white/[0.07] dark:bg-[#161b26] text-xs" data-testid="secondary-toolbar-crop">
     <button type="button" class="flex items-center gap-1.5 rounded-md bg-[#0067c0] px-3 py-1 text-white font-medium hover:bg-[#1070c7] cursor-pointer" onclick={onApplyCrop}>
       <Check class="w-3.5 h-3.5" /> Apply <span class="opacity-60">(Enter)</span>
