@@ -484,12 +484,24 @@
         >
           <Shapes class="w-4 h-4 stroke-[1.8]" />
           {#if showAltHints}<span class="absolute -top-2 left-1/2 -translate-x-1/2 rounded bg-[#0067c0] px-1 text-[8px] font-bold text-white shadow">S</span>{/if}
-          {#if emojiGlyph}
+          {#if emojiGlyph && activeTool === 'shapes'}
             <span class="text-sm leading-none">{emojiGlyph}</span>
           {/if}
         </button>
 
       </div>
+
+      <!-- Ruler (drafting overlay) -->
+      <button
+        type="button"
+        aria-pressed={draftingTool === 'ruler'}
+        class="w-8 h-8 rounded-[6px] flex items-center justify-center transition-colors relative {draftingTool === 'ruler' ? 'bg-[#0067c0] text-white' : 'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] text-neutral-700 dark:text-neutral-300'}"
+        onclick={() => onDraftingChange(draftingTool === 'ruler' ? 'off' : 'ruler')}
+        title="Show ruler (Ctrl+R)"
+      >
+        <Ruler class="w-4 h-4 stroke-[1.8]" />
+        {#if showAltHints}<span class="absolute -top-2 left-1/2 -translate-x-1/2 rounded bg-[#0067c0] px-1 text-[8px] font-bold text-white shadow">R</span>{/if}
+      </button>
 
       <div class="w-[1px] h-5 bg-black/[0.08] dark:bg-white/[0.08] mx-1"></div>
 

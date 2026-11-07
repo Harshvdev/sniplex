@@ -128,7 +128,7 @@
     <div class="flex items-center gap-1" role="group" aria-label="Shapes">
       {#each shapes as s}
         {@const Icon = s.icon}
-        <button type="button" title={s.label} aria-pressed={shapeKind === s.kind} class="flex h-7 w-7 items-center justify-center rounded hover:bg-black/5 dark:hover:bg-white/10 {shapeKind === s.kind ? 'bg-[#0067c0] text-white' : ''}" onclick={() => onShapeKindChange(s.kind)}>
+        <button type="button" title={s.label} aria-pressed={shapeKind === s.kind && !emojiGlyph} class="flex h-7 w-7 items-center justify-center rounded hover:bg-black/5 dark:hover:bg-white/10 {shapeKind === s.kind && !emojiGlyph ? 'bg-[#0067c0] text-white' : ''}" onclick={() => onShapeKindChange(s.kind)}>
           <Icon class="w-4 h-4 stroke-[2]" />
         </button>
       {/each}

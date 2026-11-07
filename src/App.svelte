@@ -1490,10 +1490,17 @@
       if (key === '1' || key === 'n') { e.preventDefault(); handleTriggerNew(); return; }
       if (key === 't') { e.preventDefault(); touchWritingEnabled = !touchWritingEnabled; return; }
       if (!hasImageTab) { /* editor tools have no target without an image */ }
-      else if (key === 'b') { e.preventDefault(); activeTool = 'pen'; return; }
-      else if (key === 'h') { e.preventDefault(); activeTool = 'highlighter'; return; }
-      else if (key === 'e') { e.preventDefault(); activeTool = 'eraser'; return; }
-      if (key === 'i') { e.preventDefault(); if (hasImageTab) isCropping = !isCropping; return; }
+      else if (key === 'b') { e.preventDefault(); activeTool = 'pen'; emojiGlyph = null; isCropping = false; return; }
+      else if (key === 'h') { e.preventDefault(); activeTool = 'highlighter'; emojiGlyph = null; isCropping = false; return; }
+      else if (key === 'e') { e.preventDefault(); activeTool = 'eraser'; emojiGlyph = null; isCropping = false; return; }
+      if (key === 'i') {
+        e.preventDefault();
+        if (hasImageTab) {
+          isCropping = !isCropping;
+          if (isCropping) { activeTool = 'select'; emojiGlyph = null; }
+        }
+        return;
+      }
       if (key === 's') { e.preventDefault(); handleSave(); return; }
       if (key === 'z') { e.preventDefault(); openFlyout('zoom'); return; }
       if (key === '2') { e.preventDefault(); openFlyout('snipType'); return; }
@@ -1581,12 +1588,16 @@
         onModeChange={handleModeChange}
         onSnipTypeChange={handleSnipTypeChange}
         onDelayChange={handleDelayChange}
-        onToolChange={(t) => activeTool = t}
+        onToolChange={(t) => {
+          activeTool = t;
+          if (t !== 'shapes') emojiGlyph = null;
+          if (t !== 'select') isCropping = false;
+        }}
         onPenColorChange={(c) => penColor = c}
         onPenSizeChange={(s) => penSize = s}
         onHighlighterColorChange={(c) => highlighterColor = c}
         onHighlighterSizeChange={(s) => highlighterSize = clampHighlighterSize(s)}
-        onShapeKindChange={(s) => shapeKind = s}
+        onShapeKindChange={(s) => { shapeKind = s; emojiGlyph = null; }}
         onZoomCommand={handleZoomCommand}
         onZoomChange={(z) => zoom = clampZoom(z)}
         onSave={handleSave}
@@ -1602,7 +1613,13 @@
         onOpenScreenshotsFolder={handleOpenScreenshotsFolder}
         {openFlyoutSignal}
         onPrint={handlePrint}
-        onToggleCrop={() => isCropping = !isCropping}
+        onToggleCrop={() => {
+          isCropping = !isCropping;
+          if (isCropping) {
+            activeTool = 'select';
+            emojiGlyph = null;
+          }
+        }}
         onClearAll={handleEraseAllInk}
       />
 
@@ -1617,7 +1634,7 @@
         {shapeOutlineOpacity}
         {shapeStrokeWidth}
         {emojiGlyph}
-        onShapeKindChange={(s) => shapeKind = s}
+        onShapeKindChange={(s) => { shapeKind = s; emojiGlyph = null; }}
         onFillColorChange={(c) => shapeFillColor = c}
         onFillOpacityChange={(o) => shapeFillOpacity = o}
         onOutlineColorChange={(c) => shapeOutlineColor = c}
