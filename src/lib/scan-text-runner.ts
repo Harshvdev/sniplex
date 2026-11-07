@@ -1,10 +1,11 @@
 /**
- * Phase 21 — browser OCR runner (Tesseract.js, WASM, fully local).
+ * Phase 21 — browser OCR runner (Tesseract.js, WASM, fully local & offline).
  *
  * The engine loads lazily on first Scan Text click and a single worker
- * is reused across images. No image ever leaves the device; the only
- * network use is the CDN-hosted language/core assets on first run,
- * cached by the browser afterwards.
+ * is reused across images. No image ever leaves the device. All assets
+ * are vendored in public/tess/ so a build runs without internet:
+ * worker.min.js + tesseract-core-lstm.wasm.js + eng.traineddata.gz.
+ * Do not add CDN URLs here — offline is the contract.
  */
 import { buildPlainText, buildTsv, clusterTable, normalizeTesseractPage, scaleBboxes, type ScanResult } from './scan-text';
 
@@ -49,7 +50,14 @@ async function getWorker(onProgress?: (p: number) => void): Promise<TesseractWor
     const mod = await import('tesseract.js');
     const createWorker = (mod as unknown as { createWorker: (langs: string, oem?: number, opts?: unknown) => Promise<TesseractWorker> }).createWorker;
     if (!createWorker) throw new Error('Tesseract.js failed to load');
+    // Vendored assets in public/tess/ — served verbatim from dist root.
+    // corePath ends in .js so getCore loads the non-SIMD LSTM build directly.
     const worker = await createWorker('eng', 1, {
+      workerPath: '/tess/worker.min.js',
+      corePath: '/tess/tesseract-core-lstm.wasm.js',
+      langPath: '/tess',
+      cachePath: '/tess',
+      gzip: true,
       logger: (m: { progress?: number; status?: string }) => {
         if (gen !== workerGen) return;
         if (typeof m?.progress === 'number') onProgress?.(m.progress);
