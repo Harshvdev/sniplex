@@ -26,6 +26,8 @@ export interface TextLabel {
   italic: boolean;
   underline: boolean;
   highlight: boolean;
+  /** Max line width in px (0 = natural width, no wrap). Set via side handles. */
+  maxWidth: number;
 }
 
 export const TEXT_FONT_FAMILIES = [
@@ -68,6 +70,7 @@ export function createTextLabel(partial: Partial<TextLabel> = {}): TextLabel {
     italic: partial.italic ?? false,
     underline: partial.underline ?? false,
     highlight: partial.highlight ?? false,
+    maxWidth: Math.max(0, Number.isFinite(partial.maxWidth) ? partial.maxWidth! : 0),
   };
 }
 
@@ -86,21 +89,56 @@ export function labelLineHeight(fontSize: number): number {
 
 /** Total height of a (possibly multi-line) label. */
 export function labelHeight(label: TextLabel): number {
-  return textLines(label.text).length * labelLineHeight(label.fontSize);
+  return wrappedTextLines(label).length * labelLineHeight(label.fontSize);
+}
+
+/**
+ * Display lines after word-wrapping at maxWidth (0 = no wrap). Explicit
+ * newlines always split; long words are never split mid-word.
+ */
+export function wrappedTextLines(label: TextLabel): string[] {
+  const maxWidth = label.maxWidth ?? 0;
+  if (!maxWidth || maxWidth <= 0) return textLines(label.text);
+  const out: string[] = [];
+  for (const segment of textLines(label.text)) {
+    if (!segment) {
+      out.push('');
+      continue;
+    }
+    let line = '';
+    for (const word of segment.split(' ')) {
+      const candidate = line ? `${line} ${word}` : word;
+      if (line && estimateTextWidth(label.fontSize, candidate, label) > maxWidth) {
+        out.push(line);
+        line = word;
+      } else {
+        line = candidate;
+      }
+    }
+    out.push(line);
+  }
+  return out;
 }
 
 /**
  * Width of one line of text at a given size. Uses a measured canvas width
  * when a DOM is available; falls back to a character-width approximation
- * in headless/test environments.
+ * in headless/test environments. Bold/italic labels measure with the
+ * matching weight and style so wrapping matches the rendered editor.
  */
-export function estimateTextWidth(fontSize: number, text: string): number {
+export function estimateTextWidth(
+  fontSize: number,
+  text: string,
+  options?: { bold?: boolean; italic?: boolean }
+): number {
   if (!text) return 0;
   try {
     if (typeof document !== 'undefined') {
       const ctx = document.createElement('canvas').getContext('2d');
       if (ctx) {
-        ctx.font = `${fontSize}px 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif`;
+        const weight = options?.bold ? '700' : '400';
+        const style = options?.italic ? 'italic' : 'normal';
+        ctx.font = `${style} ${weight} ${fontSize}px 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif`;
         return ctx.measureText(text).width;
       }
     }
@@ -110,9 +148,15 @@ export function estimateTextWidth(fontSize: number, text: string): number {
   return text.length * fontSize * 0.6;
 }
 
-/** Widest line of a label — the box width used for alignment and hit-testing. */
+/**
+ * Visible box width of a label. An explicit line width (set by a side or
+ * corner drag) is the box width, so stretching the side handles widens the
+ * box itself. Without one, the box hugs the widest wrapped text line.
+ */
 export function labelWidth(label: TextLabel): number {
-  return Math.max(0, ...textLines(label.text).map((line) => estimateTextWidth(label.fontSize, line)));
+  const maxWidth = label.maxWidth ?? 0;
+  if (maxWidth > 0) return maxWidth;
+  return Math.max(0, ...wrappedTextLines(label).map((line) => estimateTextWidth(label.fontSize, line, label)));
 }
 
 /** Distance from a point to the label's bounding box (0 = inside). */
@@ -127,4 +171,119 @@ export function labelHitDistance(label: TextLabel, x: number, y: number): number
 /** True when a click at (x, y) selects the label. */
 export function hitTextLabel(label: TextLabel, x: number, y: number, tolerance = 8): boolean {
   return labelHitDistance(label, x, y) <= tolerance;
+}
+
+export type TextZone = 'interior' | 'nw' | 'ne' | 'sw' | 'se' | 'w' | 'e' | 'n' | 's';
+
+export interface CornerResizeResult {
+  ratio: number;
+  fontSize: number;
+  width: number;
+  height: number;
+  x: number;
+  y: number;
+}
+
+/**
+ * Uniform corner scale: the box (and its text) grow/shrink by one ratio so
+ * the aspect (width/height) stays constant, anchored on the opposite
+ * corner which stays fixed. Ratio is clamped to the font size limits.
+ */
+export function cornerScale(
+  zone: 'nw' | 'ne' | 'sw' | 'se',
+  pointer: { x: number; y: number },
+  box: { x: number; y: number; width: number; height: number },
+  fontSize: number
+): CornerResizeResult {
+  const anchorIsRight = zone === 'nw' || zone === 'sw';
+  const anchorIsBottom = zone === 'nw' || zone === 'ne';
+  const anchorX = anchorIsRight ? box.x + box.width : box.x;
+  const anchorY = anchorIsBottom ? box.y + box.height : box.y;
+  const cornerX = anchorIsRight ? box.x : box.x + box.width;
+  const cornerY = anchorIsBottom ? box.y : box.y + box.height;
+  const startDist = Math.hypot(cornerX - anchorX, cornerY - anchorY) || 1;
+  const nowDist = Math.hypot(pointer.x - anchorX, pointer.y - anchorY);
+  const raw = nowDist / startDist;
+  const minRatio = TEXT_MIN_SIZE / fontSize;
+  const maxRatio = TEXT_MAX_SIZE / fontSize;
+  const ratio = Math.min(maxRatio, Math.max(minRatio, raw));
+  const width = box.width * ratio;
+  const height = box.height * ratio;
+  return {
+    ratio,
+    fontSize: clampTextSize(fontSize * ratio),
+    width,
+    height,
+    x: anchorIsRight ? anchorX - width : anchorX,
+    y: anchorIsBottom ? anchorY - height : anchorY,
+  };
+}
+
+/** Half-thickness of the edge band around the box border, in image px. */
+export const TEXT_EDGE_TOL = 8;
+
+/**
+ * Canva-style zone under a point, in image coordinates.
+ * Thin edge bands (not wide dot circles) hug the border, so a click
+ * well inside the border stays `interior` (edit) and never moves the box:
+ * - corners (within the band of both a horizontal and vertical edge) → resize
+ * - left / right edges → width change
+ * - top / bottom edges → move the box
+ * - strictly inside → interior (edit)
+ *
+ * The band overlaps both sides of the border, so hovering just outside
+ * an edge also shows the matching cursor. The tolerance adapts to very
+ * small boxes so a tiny label still has an interior core.
+ *
+ * Returns null outside the box (beyond the edge band).
+ */
+export function textBoxZone(label: TextLabel, x: number, y: number): TextZone | null {
+  const w = Math.max(labelWidth(label), 8);
+  const h = Math.max(labelHeight(label), 8);
+  const left = label.x;
+  const right = label.x + w;
+  const top = label.y;
+  const bottom = label.y + h;
+  // Adaptive: keep an interior core even on narrow/single-char labels.
+  const tol = Math.min(TEXT_EDGE_TOL, w / 3, h / 3);
+  if (x < left - tol || x > right + tol || y < top - tol || y > bottom + tol) return null;
+  const nearLeft = Math.abs(x - left) <= tol;
+  const nearRight = Math.abs(x - right) <= tol;
+  const nearTop = Math.abs(y - top) <= tol;
+  const nearBottom = Math.abs(y - bottom) <= tol;
+  if ((nearLeft || nearRight) && (nearTop || nearBottom)) {
+    // Corner: pick the nearest corner when a very small box is near two.
+    const corners: [TextZone, number, number][] = [
+      ['nw', left, top],
+      ['ne', right, top],
+      ['sw', left, bottom],
+      ['se', right, bottom],
+    ];
+    corners.sort((a, b) => Math.hypot(x - a[1], y - a[2]) - Math.hypot(x - b[1], y - b[2]));
+    return corners[0][0];
+  }
+  if (nearLeft || nearRight) {
+    // Edge (not corner): closer side wins on narrow boxes.
+    if (nearLeft && nearRight) return x - left <= right - x ? 'w' : 'e';
+    return nearLeft ? 'w' : 'e';
+  }
+  if (nearTop || nearBottom) {
+    if (nearTop && nearBottom) return y - top <= bottom - y ? 'n' : 's';
+    return nearTop ? 'n' : 's';
+  }
+  return 'interior';
+}
+
+/**
+ * Canvas cursor naming a text-box zone (Canva-style):
+ * corners → resize, left/right → width, top/bottom → move, interior → edit.
+ * Returns null for a null zone (caller falls back to the default cursor).
+ */
+export function textZoneCursor(zone: TextZone | null): string | null {
+  if (!zone) return null;
+  if (zone === 'interior') return 'cursor-text';
+  if (zone === 'nw' || zone === 'se') return 'cursor-nwse-resize';
+  if (zone === 'ne' || zone === 'sw') return 'cursor-nesw-resize';
+  if (zone === 'w' || zone === 'e') return 'cursor-ew-resize';
+  return 'cursor-move';
 }

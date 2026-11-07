@@ -7,6 +7,7 @@
   let {
     activeTool = 'select',
     isCropping = false,
+    hasImage = false,
     // Shapes
     shapeKind = 'rectangle',
     shapeFillColor = 'transparent',
@@ -45,6 +46,8 @@
   }: {
     activeTool: ToolType;
     isCropping: boolean;
+    /** Secondary options only exist once a capture is loaded. */
+    hasImage: boolean;
     shapeKind: ShapeKind;
     shapeFillColor: string;
     shapeFillOpacity: number;
@@ -93,9 +96,19 @@
   function toggle(menu: 'emoji' | 'fill' | 'outline') {
     openMenu = openMenu === menu ? null : menu;
   }
+
+  // Clicking outside any open dropdown closes it.
+  function closeOnOutside(e: PointerEvent) {
+    if (!openMenu) return;
+    const target = e.target as Element | null;
+    if (target?.closest?.('.secondary-menu')) return;
+    openMenu = null;
+  }
 </script>
 
-{#if isCropping}
+<svelte:window onpointerdown={closeOnOutside} />
+
+{#if hasImage && isCropping}
   <div class="flex h-10 items-center gap-2 border-b border-black/[0.06] bg-[#fdfdfd] px-3 dark:border-white/[0.07] dark:bg-[#161b26] text-xs" data-testid="secondary-toolbar-crop">
     <button type="button" class="flex items-center gap-1.5 rounded-md bg-[#0067c0] px-3 py-1 text-white font-medium hover:bg-[#1070c7] cursor-pointer" onclick={onApplyCrop}>
       <Check class="w-3.5 h-3.5" /> Apply <span class="opacity-60">(Enter)</span>
@@ -105,20 +118,20 @@
     </button>
     <span class="text-neutral-400">Drag handles to resize · arrows pan the frame</span>
   </div>
-{:else if activeTool === 'shapes'}
+{:else if hasImage && activeTool === 'shapes'}
   <div class="flex min-h-10 flex-wrap items-center gap-2 border-b border-black/[0.06] bg-[#fdfdfd] px-3 py-1 dark:border-white/[0.07] dark:bg-[#161b26] text-xs" data-testid="secondary-toolbar-shapes">
-    <div class="relative">
-      <button type="button" class="flex items-center gap-1.5 rounded-md px-2 py-1 hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer" onclick={() => toggle('emoji')} aria-pressed={emojiGlyph !== null}>
+    <div class="relative secondary-menu">
+      <button type="button" class="flex items-center gap-1.5 rounded-md px-2 py-1 hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer" onclick={() => toggle('emoji')}>
         <Smile class="w-4 h-4" /> Emoji
       </button>
       {#if openMenu === 'emoji'}
         <div class="absolute left-0 top-full z-50 mt-1 w-64 rounded-lg border border-black/10 bg-white p-2 shadow-xl dark:border-white/10 dark:bg-[#181d28]">
           <div class="grid grid-cols-8 gap-1 max-h-40 overflow-y-auto">
             {#each EMOJI_PALETTE as glyph}
-              <button type="button" class="flex h-8 items-center justify-center rounded text-lg hover:bg-black/5 dark:hover:bg-white/10 {emojiGlyph === glyph ? 'bg-[#0067c0] text-white' : ''}" onclick={() => { onEmojiSelect(emojiGlyph === glyph ? null : glyph); }}>{glyph}</button>
+              <button type="button" class="flex h-8 items-center justify-center rounded text-lg hover:bg-black/5 dark:hover:bg-white/10" title="Stamp at center" onclick={() => onEmojiSelect(glyph)}>{glyph}</button>
             {/each}
           </div>
-          <p class="mt-1 text-[10px] text-neutral-400">Click the canvas to drop at center.</p>
+          <p class="mt-1 text-[10px] text-neutral-400">Click an emoji to stamp it at center.</p>
         </div>
       {/if}
     </div>
@@ -128,7 +141,7 @@
     <div class="flex items-center gap-1" role="group" aria-label="Shapes">
       {#each shapes as s}
         {@const Icon = s.icon}
-        <button type="button" title={s.label} aria-pressed={shapeKind === s.kind && !emojiGlyph} class="flex h-7 w-7 items-center justify-center rounded hover:bg-black/5 dark:hover:bg-white/10 {shapeKind === s.kind && !emojiGlyph ? 'bg-[#0067c0] text-white' : ''}" onclick={() => onShapeKindChange(s.kind)}>
+        <button type="button" title={s.label} aria-pressed={shapeKind === s.kind} class="flex h-7 w-7 items-center justify-center rounded hover:bg-black/5 dark:hover:bg-white/10 {shapeKind === s.kind ? 'bg-[#0067c0] text-white' : ''}" onclick={() => onShapeKindChange(s.kind)}>
           <Icon class="w-4 h-4 stroke-[2]" />
         </button>
       {/each}
@@ -136,7 +149,7 @@
 
     <div class="h-4 w-px bg-black/10 dark:bg-white/10"></div>
 
-    <div class="relative">
+    <div class="relative secondary-menu">
       <button type="button" class="flex items-center gap-1.5 rounded-md px-2 py-1 hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer" onclick={() => toggle('fill')}>
         <span class="h-3.5 w-3.5 rounded-full border" style={shapeFillColor === 'transparent' ? 'background: repeating-conic-gradient(#999 0% 25%, #fff 0% 50%) 0 0/8px 8px' : `background:${shapeFillColor}`}></span> Fill
       </button>
@@ -153,7 +166,7 @@
       {/if}
     </div>
 
-    <div class="relative">
+    <div class="relative secondary-menu">
       <button type="button" class="flex items-center gap-1.5 rounded-md px-2 py-1 hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer" onclick={() => toggle('outline')}>
         <span class="h-3.5 w-3.5 rounded-full border" style="background:{shapeOutlineColor}"></span> Outline
       </button>
@@ -170,7 +183,7 @@
       {/if}
     </div>
   </div>
-{:else if activeTool === 'text'}
+{:else if hasImage && activeTool === 'text'}
   <div class="flex min-h-10 flex-wrap items-center gap-2 border-b border-black/[0.06] bg-[#fdfdfd] px-3 py-1 dark:border-white/[0.07] dark:bg-[#161b26] text-xs" data-testid="secondary-toolbar-text">
     <select class="rounded border border-black/10 bg-white px-1.5 py-1 text-[11px] dark:border-white/10 dark:bg-[#10141f]" value={textFontFamily} onchange={(e) => onTextFontFamilyChange((e.target as HTMLSelectElement).value)} aria-label="Font family">
       {#each TEXT_FONT_FAMILIES as f}

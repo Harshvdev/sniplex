@@ -20,6 +20,7 @@
   import type { HistorySnapshot } from '../history';
   import {
     clampTextSize,
+    cornerScale,
     createTextLabel,
     estimateTextWidth,
     hitTextLabel,
@@ -27,9 +28,13 @@
     labelHeight,
     labelLineHeight,
     labelWidth,
+    textBoxZone,
     textLines,
+    textZoneCursor,
+    wrappedTextLines,
     type TextAlign,
     type TextLabel,
+    type TextZone,
   } from '../text-label';
   import DraftingOverlay from './DraftingOverlay.svelte';
   import {
@@ -195,6 +200,37 @@
     e.preventDefault();
     e.stopPropagation();
     cropDrag = { handle, startClientX: e.clientX, startClientY: e.clientY, original: cropRect };
+    capturePointer(e.pointerId);
+  }
+
+  /**
+   * Begins a zone drag from a visible text-box handle dot. Works for the
+   * box being edited as well as committed boxes: while editing, the drag
+   * updates the editing label live and the edit session (with its history
+   * snapshot) stays open until click-away/Esc commits it. preventDefault
+   * also keeps the editor focused instead of blurring it first.
+   */
+  function beginTextZoneDrag(label: TextLabel, zone: TextZone, e: PointerEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (zone === 'interior') return;
+    const point = clientToImage(e.clientX, e.clientY);
+    // Editing drags are part of the edit session; keep its original snapshot.
+    if (editingLabel?.id !== label.id) textStrokeSnapshot = captureSnapshot();
+    textResize = {
+      id: label.id,
+      zone,
+      startX: point.x,
+      startY: point.y,
+      originalX: label.x,
+      originalY: label.y,
+      origW: editingLabel?.id === label.id ? editingBoxWidth(label) : labelWidth(label),
+      origH: editingLabel?.id === label.id ? (editingBoxHeight ?? labelHeight(label)) : labelHeight(label),
+      origFontSize: label.fontSize,
+      origMaxWidth: label.maxWidth ?? 0,
+      moved: false,
+    };
+    isDrawing = true;
     capturePointer(e.pointerId);
   }
 
@@ -458,7 +494,7 @@
   }
 
   /** Stamps an emoji glyph at the canvas center, through history. */
-  function stampEmoji(glyph: string) {
+  export function stampEmoji(glyph: string) {
     if (!ctx) return;
     const before = captureSnapshot();
     const op: MarkupOp = {
@@ -680,16 +716,162 @@
   // Phase 12: inline editor state for the label currently being typed, plus
   // typography state. Committed labels live in `ops`.
   let editingLabel = $state<TextLabel | null>(null);
+
+  /**
+   * Visible width of the editing box. An explicit line width (set by a
+   * side/corner drag) wins so the box can grow *and* shrink; otherwise the
+   * editor keeps a 120px floor for typing space.
+   */
+  function editingBoxWidth(l: TextLabel): number {
+    return l.maxWidth > 0 ? l.maxWidth : Math.max(120, labelWidth(l));
+  }
   // Typography state is owned by the App shell (secondary toolbar).
-  let textDrag: {
+  let textResize: {
     id: string;
+    zone: TextZone;
     startX: number;
     startY: number;
     originalX: number;
     originalY: number;
+    origW: number;
+    origH: number;
+    origFontSize: number;
+    origMaxWidth: number;
     moved: boolean;
   } | null = null;
+  let hoverZone = $state<TextZone | null>(null);
+
+  /**
+   * Measured height (image px) of the open editor's rendered text, taken
+   * from the textarea itself. The estimate can disagree with the browser
+   * (weights, widths), which would leave wrapped lines cut off below the
+   * border — the measured value is the source of truth while editing.
+   */
+  let editingBoxHeight = $state<number | null>(null);
+  let measuredEditingId: string | null = null;
+  /** Editor id already focused once (so toolbar styling keeps its focus). */
+  let focusedEditingId: string | null = null;
+  /** Last toolbar typography seen, so only real toolbar changes apply live. */
+  let lastToolbarStyle: {
+    fontSize: number;
+    color: string;
+    fontFamily: string;
+    bold: boolean;
+    italic: boolean;
+    underline: boolean;
+    highlight: boolean;
+    align: TextAlign;
+  } | null = null;
+
+  // Zone + cursor mapping lives in text-label.ts (Canva-style edge bands:
+  // corners resize, left/right edges change width, top/bottom edges move,
+  // strictly inside stays interior/edit).
+
+  /**
+   * Every label that shows handle dots: committed labels plus the label
+   * currently being edited (including a brand-new one with no committed
+   * op yet), so the dots are visible as soon as the box spawns — not only
+   * after click-away commits it. The editing box uses the textarea width
+   * (120px floor), matching the editor the user sees.
+   */
+  let textHandleItems = $derived.by((): { label: TextLabel; dw: number; dh: number }[] => {
+    if (activeTool !== 'text' || isCropping) return [];
+    const items: { label: TextLabel; dw: number; dh: number }[] = [];
+    for (const op of ops) {
+      if (op.type !== 'label' || op.label.id === editingLabel?.id) continue;
+      items.push({ label: op.label, dw: Math.max(labelWidth(op.label), 8), dh: Math.max(labelHeight(op.label), 8) });
+    }
+    if (editingLabel) {
+      items.push({
+        label: editingLabel,
+        dw: editingBoxWidth(editingLabel),
+        dh: Math.max(editingBoxHeight ?? labelHeight(editingLabel), 8),
+      });
+    }
+    return items;
+  });
+
   let textInputEl = $state<HTMLTextAreaElement | null>(null);
+
+  // Focus the inline editor when it first appears so typing starts at once.
+  // Only the first appearance focuses: refocusing on every change would
+  // steal focus back from the toolbar while styling size/color from above.
+  $effect(() => {
+    const id = editingLabel?.id ?? null;
+    if (!id) {
+      focusedEditingId = null;
+      return;
+    }
+    if (textInputEl && focusedEditingId !== id) {
+      focusedEditingId = id;
+      textInputEl.focus();
+    }
+  });
+
+  // Keep the borders fitted to the rendered text: measure the textarea's
+  // real content height (at auto height) and drive both the editor height
+  // and the dashed border from it, so wrapped lines are never cut off.
+  $effect(() => {
+    const label = editingLabel;
+    const el = textInputEl;
+    if (!label || !el) return;
+    // Re-measure whenever the rendered shape changes.
+    void label.text;
+    void label.fontSize;
+    void label.maxWidth;
+    void label.fontFamily;
+    void label.bold;
+    void label.italic;
+    void zoom;
+    if (label.id !== measuredEditingId) {
+      measuredEditingId = label.id;
+      editingBoxHeight = null;
+    }
+    const previousHeight = el.style.height;
+    el.style.height = 'auto';
+    const measured = el.scrollHeight / (zoom / 100);
+    el.style.height = previousHeight;
+    if (editingBoxHeight === null || Math.abs(editingBoxHeight - measured) > 0.5) {
+      editingBoxHeight = measured;
+    }
+  });
+
+  // Apply toolbar typography live to the open editor. Only real toolbar
+  // changes apply — typing or corner drags never trigger a revert.
+  $effect(() => {
+    const next = {
+      fontSize: clampTextSize(textFontSize),
+      color: textColor,
+      fontFamily: textFontFamily,
+      bold: textBold,
+      italic: textItalic,
+      underline: textUnderline,
+      highlight: textHighlight,
+      align: textAlign,
+    };
+    if (lastToolbarStyle === null) {
+      lastToolbarStyle = next;
+      return;
+    }
+    const prev = lastToolbarStyle;
+    const changed =
+      next.fontSize !== prev.fontSize ||
+      next.color !== prev.color ||
+      next.fontFamily !== prev.fontFamily ||
+      next.bold !== prev.bold ||
+      next.italic !== prev.italic ||
+      next.underline !== prev.underline ||
+      next.highlight !== prev.highlight ||
+      next.align !== prev.align;
+    lastToolbarStyle = next;
+    if (!changed || !editingLabel) return;
+    editingLabel = { ...editingLabel, ...next };
+  });
+
+  /** True when focus is moving to a control in the secondary toolbar. */
+  function isSecondaryToolbarTarget(target: EventTarget | null): boolean {
+    return target instanceof Element && !!target.closest('[data-testid^="secondary-toolbar"]');
+  }
 
   /** Draws one text label onto a 2d context at image-pixel coordinates. */
   function drawTextLabel(target: CanvasRenderingContext2D, label: TextLabel) {
@@ -701,8 +883,8 @@
     target.textBaseline = 'top';
     const width = labelWidth(label);
     const lineHeight = labelLineHeight(label.fontSize);
-    for (const [index, line] of textLines(label.text).entries()) {
-      const lineWidth = estimateTextWidth(label.fontSize, line);
+    for (const [index, line] of wrappedTextLines(label).entries()) {
+      const lineWidth = estimateTextWidth(label.fontSize, line, label);
       const offset =
         label.align === 'center'
           ? (width - lineWidth) / 2
@@ -729,10 +911,12 @@
   function commitEditing() {
     if (!editingLabel || !ctx) {
       editingLabel = null;
+      editingBoxHeight = null;
       return;
     }
     const label = editingLabel;
     editingLabel = null;
+    editingBoxHeight = null;
     const opIndex = ops.findIndex((op) => op.type === 'label' && op.label.id === label.id);
     const existed = opIndex >= 0;
     const before = textStrokeSnapshot;
@@ -814,6 +998,14 @@
   // Pixel edges stay crisp when magnifying past 2x so individual pixels are readable.
   let imageRendering = $derived(zoom >= 200 ? 'pixelated' : 'auto');
   let panCursor = $derived(spaceHeld);
+  let canvasCursor = $derived(
+    isPanning || panCursor
+      ? isPanning
+        ? 'cursor-grabbing'
+        : 'cursor-grab'
+      : (textZoneCursor(hoverZone) ?? 'cursor-crosshair')
+  );
+
 
   let imageLoadToken = 0;
   // Pristine capture kept aside; the composite is re-rendered from it plus
@@ -876,7 +1068,7 @@
         selectedEmojiId = null;
         wetShapeId = null;
         editingLabel = null;
-        textDrag = null;
+        textResize = null;
         emojiDrag = null;
         strokeStartSnapshot = null;
         textStrokeSnapshot = null;
@@ -896,7 +1088,7 @@
       selectedEmojiId = null;
       wetShapeId = null;
       editingLabel = null;
-      textDrag = null;
+      textResize = null;
       emojiDrag = null;
       strokeStartSnapshot = null;
       textStrokeSnapshot = null;
@@ -1333,15 +1525,43 @@
     // instead of inking a new stroke over it.
     if (activeTool === 'text' && !isCropping) {
       const point = clientToImage(clientX, clientY);
-      const hit = ops.find((op) => op.type === 'label' && hitTextLabel(op.label, point.x, point.y));
+      // Topmost label wins; the hit zone decides edit vs resize vs move.
+      const hit = [...ops].reverse().find((op) => op.type === 'label' && hitTextLabel(op.label, point.x, point.y));
       if (hit && hit.type === 'label') {
-        // Start a potential drag; finishing without movement reopens the editor.
-        textStrokeSnapshot = captureSnapshot();
         const label = hit.label;
-        textDrag = { id: label.id, startX: point.x, startY: point.y, originalX: label.x, originalY: label.y, moved: false };
+        const zone = textBoxZone(label, point.x, point.y) ?? 'interior';
+        textStrokeSnapshot = captureSnapshot();
+        if (zone === 'interior') {
+          // Interior click: edit the text (never moves the box). Freeze the
+          // width for this edit session: typing keeps the box's width
+          // constant and the height grows downward as lines wrap.
+          editingLabel = {
+            ...label,
+            maxWidth: label.maxWidth > 0 ? label.maxWidth : Math.max(120, labelWidth(label)),
+          };
+          return;
+        }
+        textResize = {
+          id: label.id,
+          zone,
+          startX: point.x,
+          startY: point.y,
+          originalX: label.x,
+          originalY: label.y,
+          origW: labelWidth(label),
+          origH: labelHeight(label),
+          origFontSize: label.fontSize,
+          origMaxWidth: label.maxWidth ?? 0,
+          moved: false,
+        };
+        // Route pointermove through drawStrokeTo for the zone drag.
+        isDrawing = true;
         return;
       }
-      // No label here: open the inline text editor at this spot.
+      // No label here: open the inline text editor, centered on this spot.
+      // The new box starts at a fixed width (120px): while typing the width
+      // (x) stays constant and the height (y) grows downward as text wraps,
+      // matching the Canva behavior.
       textStrokeSnapshot = captureSnapshot();
       const label = createTextLabel({
         text: '',
@@ -1355,7 +1575,13 @@
         italic: textItalic,
         underline: textUnderline,
         highlight: textHighlight,
+        maxWidth: 120,
       });
+      // The box's middle lands on the click point (clamped to the canvas).
+      const initialWidth = Math.max(120, labelWidth(label));
+      const initialHeight = labelHeight(label);
+      label.x = Math.max(0, Math.min(point.x - initialWidth / 2, Math.max(0, canvasWidth - initialWidth)));
+      label.y = Math.max(0, Math.min(point.y - initialHeight / 2, Math.max(0, canvasHeight - initialHeight)));
       editingLabel = label;
       return;
     }
@@ -1442,19 +1668,61 @@
       return;
     }
 
-    // Phase 12: dragging a committed label moves it live.
-    if (textDrag) {
+    // Phase 12: zone drags on a label (committed, or the one being edited) —
+    // corners scale the font, left/right edges change the line width,
+    // top/bottom edges move the box. Editing drags update the editor live.
+    if (textResize) {
       const point = clientToImage(clientX, clientY);
-      const op = ops.find((o) => o.type === 'label' && o.label.id === textDrag!.id);
-      if (op && op.type === 'label') {
-        const movedLabel = {
-          ...op.label,
-          x: textDrag.originalX + (point.x - textDrag.startX),
-          y: textDrag.originalY + (point.y - textDrag.startY),
-        };
-        textDrag.moved = true;
-        ops = ops.map((o) => (o.id === op.id && o.type === 'label' ? { ...o, label: movedLabel } : o));
-        renderComposite();
+      const dx = point.x - textResize.startX;
+      const dy = point.y - textResize.startY;
+      const op = ops.find((o) => o.type === 'label' && o.label.id === textResize!.id);
+      const editing = editingLabel && editingLabel.id === textResize.id ? editingLabel : null;
+      const current = editing ?? (op && op.type === 'label' ? op.label : null);
+      if (current) {
+        // Display width matches the visible box: the textarea box while
+        // editing, the wrapped text width once committed.
+        const dispW = (l: TextLabel) => (editing ? editingBoxWidth(l) : labelWidth(l));
+        const orig = { ...current, fontSize: textResize.origFontSize, maxWidth: textResize.origMaxWidth };
+        let next = { ...current, x: textResize.originalX, y: textResize.originalY };
+        const zone = textResize.zone;
+        if (zone === 'nw' || zone === 'ne' || zone === 'sw' || zone === 'se') {
+          // Uniform scale around the opposite corner: box width, height and
+          // font all grow/shrink by one ratio, so the aspect stays constant.
+          const scaled = cornerScale(
+            zone,
+            point,
+            { x: textResize.originalX, y: textResize.originalY, width: textResize.origW, height: textResize.origH },
+            textResize.origFontSize
+          );
+          next = {
+            ...next,
+            fontSize: scaled.fontSize,
+            maxWidth: Math.min(1600, Math.max(24, scaled.width)),
+            x: scaled.x,
+            y: scaled.y,
+          };
+        } else if (zone === 'w' || zone === 'e') {
+          const base = textResize.origMaxWidth > 0 ? textResize.origMaxWidth : Math.max(48, dispW(orig));
+          const newMax = Math.min(1600, Math.max(48, base + (zone === 'e' ? dx : -dx)));
+          next = { ...next, maxWidth: newMax };
+          if (zone === 'w') {
+            const right = textResize.originalX + dispW(orig);
+            next.x = right - dispW(next);
+          }
+        } else {
+          // 'n' / 's': move the box around.
+          next.x = textResize.originalX + dx;
+          next.y = textResize.originalY + dy;
+        }
+        if (next.x !== current.x || next.y !== current.y || next.fontSize !== current.fontSize || next.maxWidth !== current.maxWidth) {
+          textResize.moved = true;
+        }
+        if (editing) {
+          editingLabel = next;
+        } else if (op && op.type === 'label') {
+          ops = ops.map((o) => (o.id === op.id && o.type === 'label' ? { ...o, label: next } : o));
+          renderComposite();
+        }
       }
       return;
     }
@@ -1549,21 +1817,25 @@
       return;
     }
 
-    // Phase 12: a drag that moved a label commits it to history;
-    // a press that never moved reopens the label editor.
-    if (textDrag) {
-      const drag = textDrag;
-      textDrag = null;
+    // Phase 12: a zone drag on a label commits to history. An editing drag
+    // stays in the edit session (history is pushed on commit), so just
+    // end the drag and keep the editor focused.
+    if (textResize) {
+      const drag = textResize;
+      textResize = null;
+      isDrawing = false;
+      if (editingLabel?.id === drag.id) {
+        textInputEl?.focus();
+        return;
+      }
       const op = ops.find((o) => o.type === 'label' && o.label.id === drag.id);
       if (!op || op.type !== 'label') return;
       if (drag.moved) {
         const before = textStrokeSnapshot;
         const after = captureSnapshot();
-        if (before && after) onHistoryPush?.('move text label', before, after);
+        const moving = drag.zone === 'n' || drag.zone === 's';
+        if (before && after) onHistoryPush?.(moving ? 'move text label' : 'resize text label', before, after);
         onCanvasMutated();
-      } else {
-        textStrokeSnapshot = captureSnapshot();
-        editingLabel = { ...op.label };
       }
       return;
     }
@@ -1938,6 +2210,13 @@
       drawStrokeTo(e.clientX, e.clientY);
     } else if (isPanning && panPointerId === e.pointerId) {
       panTo(e.clientX, e.clientY);
+    } else if (activeTool === 'text' && !isCropping && !textResize) {
+      // Hover cursors name the zone under the pointer (Canva-style).
+      const point = clientToImage(e.clientX, e.clientY);
+      const hit = [...ops].reverse().find((op) => op.type === 'label' && hitTextLabel(op.label, point.x, point.y));
+      hoverZone = hit && hit.type === 'label' ? textBoxZone(hit.label, point.x, point.y) : null;
+    } else {
+      hoverZone = null;
     }
   }
 
@@ -1991,7 +2270,7 @@
       selectedEmojiId = null;
       wetShapeId = null;
       editingLabel = null;
-      textDrag = null;
+      textResize = null;
       emojiDrag = null;
       sizeInkCanvas();
       resetCropFrame();
@@ -2161,11 +2440,7 @@
   >
     <canvas
       bind:this={canvasEl}
-      class="block touch-none {isPanning || panCursor
-        ? isPanning
-          ? 'cursor-grabbing'
-          : 'cursor-grab'
-        : 'cursor-crosshair'}"
+      class="block touch-none {canvasCursor}"
       style="width: {displayWidth}px; height: {displayHeight}px; image-rendering: {imageRendering};"
     ></canvas>
 
@@ -2186,8 +2461,9 @@
         value={editingLabel.text}
         placeholder="Type label…"
         aria-label="Text label"
-        class="absolute z-10 box-border select-text rounded-sm border border-[#0067c0] bg-transparent p-0 outline-none"
-        style="left: {editingLabel.x * scale}px; top: {editingLabel.y * scale}px; width: {Math.max(120, labelWidth(editingLabel)) * scale}px; min-height: {labelHeight(editingLabel) * scale}px; font-size: {editingLabel.fontSize * scale}px; color: {editingLabel.color}; text-align: {editingLabel.align}; font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;"
+        class="absolute z-10 box-border select-text bg-transparent p-0 outline-none resize-none border-0 overflow-hidden"
+        style="left: {editingLabel.x * scale}px; top: {editingLabel.y * scale}px; width: {editingBoxWidth(editingLabel) * scale}px; height: {(editingBoxHeight ?? labelHeight(editingLabel)) * scale}px; font-size: {editingLabel.fontSize * scale}px; color: {editingLabel.color}; text-align: {editingLabel.align}; font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif; font-weight: {editingLabel.bold ? '700' : '400'}; font-style: {editingLabel.italic ? 'italic' : 'normal'}; text-decoration: {editingLabel.underline ? 'underline' : 'none'};"
+        onpointerdown={(e) => e.stopPropagation()}
         oninput={(e) => {
           if (editingLabel) editingLabel = { ...editingLabel, text: (e.target as HTMLTextAreaElement).value };
         }}
@@ -2198,8 +2474,45 @@
           }
           e.stopPropagation();
         }}
-        onblur={() => commitEditing()}
+        onblur={(e) => {
+          // Styling from the toolbar above must not end the edit: moving
+          // focus to the secondary toolbar keeps the box open/editable,
+          // with the toolbar changes applied live to it.
+          if (isSecondaryToolbarTarget(e.relatedTarget)) return;
+          commitEditing();
+        }}
       ></textarea>
+    {/if}
+
+    <!-- Phase 12 handles: Canva-style dots on every text box while the
+         Text tool is active — corner dots scale the whole box, side dots
+         change width. Top/bottom edges carry no dots: hovering them shows
+         the move cursor and dragging them moves the box. Interior stays
+         edit-only. Includes the box being edited. -->
+    {#if activeTool === 'text' && !isCropping}
+      {@const hScale = zoom / 100}
+      {#each textHandleItems as item}
+        {@const u = item.label}
+        {@const bw = item.dw * hScale}
+        {@const bh = item.dh * hScale}
+        {@const bx = u.x * hScale}
+        {@const by = u.y * hScale}
+        {@const tolPx = 8 * hScale}
+        <div class="absolute z-10 border-2 border-dashed border-[#0067c0]/70 rounded-sm pointer-events-none" style="left: {bx}px; top: {by}px; width: {bw}px; height: {bh}px;"></div>
+        <!-- Top/bottom move strips: invisible, corner-excluded bands centered
+             on the border. They provide the move cursor + drag over the
+             editor/canvas, so no dots are needed there. -->
+        {#if bw > tolPx * 2}
+          <div aria-hidden="true" class="absolute z-10 cursor-move" style="left: {bx + tolPx}px; top: {by - tolPx}px; width: {bw - tolPx * 2}px; height: {tolPx * 2}px;" onpointerdown={(e) => beginTextZoneDrag(u, 'n', e)}></div>
+          <div aria-hidden="true" class="absolute z-10 cursor-move" style="left: {bx + tolPx}px; top: {by + bh - tolPx}px; width: {bw - tolPx * 2}px; height: {tolPx * 2}px;" onpointerdown={(e) => beginTextZoneDrag(u, 's', e)}></div>
+        {/if}
+        <div role="button" aria-label="Resize text box (northwest)" tabindex="0" class="absolute z-10 h-[11px] w-[11px] rounded-full border-2 border-[#0067c0] bg-white cursor-nwse-resize" style="left: {bx - 5.5}px; top: {by - 5.5}px;" onpointerdown={(e) => beginTextZoneDrag(u, 'nw', e)}></div>
+        <div role="button" aria-label="Resize text box (northeast)" tabindex="0" class="absolute z-10 h-[11px] w-[11px] rounded-full border-2 border-[#0067c0] bg-white cursor-nesw-resize" style="left: {bx + bw - 5.5}px; top: {by - 5.5}px;" onpointerdown={(e) => beginTextZoneDrag(u, 'ne', e)}></div>
+        <div role="button" aria-label="Resize text box (southwest)" tabindex="0" class="absolute z-10 h-[11px] w-[11px] rounded-full border-2 border-[#0067c0] bg-white cursor-nesw-resize" style="left: {bx - 5.5}px; top: {by + bh - 5.5}px;" onpointerdown={(e) => beginTextZoneDrag(u, 'sw', e)}></div>
+        <div role="button" aria-label="Resize text box (southeast)" tabindex="0" class="absolute z-10 h-[11px] w-[11px] rounded-full border-2 border-[#0067c0] bg-white cursor-nwse-resize" style="left: {bx + bw - 5.5}px; top: {by + bh - 5.5}px;" onpointerdown={(e) => beginTextZoneDrag(u, 'se', e)}></div>
+        <div role="button" aria-label="Change text box width (left)" tabindex="0" class="absolute z-10 h-[11px] w-[11px] rounded-full border-2 border-[#0067c0] bg-white cursor-ew-resize" style="left: {bx - 5.5}px; top: {by + bh / 2 - 5.5}px;" onpointerdown={(e) => beginTextZoneDrag(u, 'w', e)}></div>
+        <div role="button" aria-label="Change text box width (right)" tabindex="0" class="absolute z-10 h-[11px] w-[11px] rounded-full border-2 border-[#0067c0] bg-white cursor-ew-resize" style="left: {bx + bw - 5.5}px; top: {by + bh / 2 - 5.5}px;" onpointerdown={(e) => beginTextZoneDrag(u, 'e', e)}></div>
+      {/each}
     {/if}
 
     <!-- Phase 13: bounding frame for the wet emoji (move / resize) -->

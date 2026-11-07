@@ -37,6 +37,8 @@ export interface CanvasAreaApi {
   /** Docked crop Apply/Cancel (secondary toolbar). */
   commitCrop(): void;
   cancelCrop(): void;
+  /** Emoji palette click: stamps the glyph at the canvas center. */
+  stampEmoji(glyph: string): void;
 }
 
 export interface TabItem {

@@ -297,6 +297,15 @@
     fileInputEl?.click();
   }
 
+  /** Every new capture/file starts with a fresh, default tool state. */
+  function resetToolStateForNewCapture() {
+    activeTool = 'pen';
+    touchWritingEnabled = false;
+    isCropping = false;
+    emojiGlyph = null;
+    draftingTool = 'off';
+  }
+
   function handleFileSelect(e: Event) {
     const input = e.target as HTMLInputElement;
     const file = input.files?.[0];
@@ -320,6 +329,7 @@
         };
         tabs = [...tabs, newTab];
         activeTabId = newId;
+        resetToolStateForNewCapture();
         view = 'editor';
         input.value = '';
         await tick();
@@ -1265,6 +1275,7 @@
     ];
     activeTabId = newId;
     hasUnsavedEdits = false;
+    resetToolStateForNewCapture();
     desktopCapture = null;
     pendingAutoCopy = imageUrl.length > 0;
     if (imageUrl) {
@@ -1623,10 +1634,15 @@
         onClearAll={handleEraseAllInk}
       />
 
-      <!-- 2b. Contextual secondary sub-toolbar -->
+      <!-- 2b. Contextual secondary sub-toolbar. A fixed-height slot reserves
+           the toolbar's row whether or not a tool needs options, so the
+           canvas below never shifts down (and is never overlapped). -->
+      {#if view === 'editor' && tabs.length > 0}
+        <div class="h-10 shrink-0">
       <SecondaryToolbar
         {activeTool}
         {isCropping}
+        hasImage={view === 'editor' && tabs.length > 0}
         {shapeKind}
         {shapeFillColor}
         {shapeFillOpacity}
@@ -1640,7 +1656,10 @@
         onOutlineColorChange={(c) => shapeOutlineColor = c}
         onOutlineOpacityChange={(o) => shapeOutlineOpacity = o}
         onStrokeWidthChange={(w) => shapeStrokeWidth = clampShapeWidth(w)}
-        onEmojiSelect={(g) => emojiGlyph = emojiGlyph === g ? null : g}
+        onEmojiSelect={(g) => {
+          emojiGlyph = null;
+          if (g) canvasArea?.stampEmoji(g);
+        }}
         {textFontFamily}
         {textFontSize}
         {textBold}
@@ -1658,8 +1677,10 @@
         onTextHighlightChange={(h) => textHighlight = h}
         onTextAlignChange={(a) => textAlign = a}
         onApplyCrop={() => canvasArea?.commitCrop()}
-        onCancelCrop={() => canvasArea?.cancelCrop()}
+            onCancelCrop={() => canvasArea?.cancelCrop()}
       />
+        </div>
+      {/if}
 
       <!-- 3. Main Body View (Canvas, Empty, or Settings) -->
       {#if view === 'settings'}
@@ -1668,7 +1689,7 @@
           onShortcutsChange={handleShortcutsChange}
         />
       {:else if view === 'empty' || tabs.length === 0}
-        <EmptyState {mode} />
+        <EmptyState />
       {:else}
         <CanvasArea
           bind:this={canvasArea}
